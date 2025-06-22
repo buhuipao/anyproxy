@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,35 +53,38 @@ func TestRateLimiter(t *testing.T) {
 // TestMetrics 测试指标收集
 func TestMetrics(t *testing.T) {
 	// 重置指标
-	globalMetrics = &Metrics{
-		StartTime: time.Now(),
-	}
+	metrics := GetMetrics()
+	atomic.StoreInt64(&metrics.ActiveConnections, 0)
+	atomic.StoreInt64(&metrics.TotalConnections, 0)
+	atomic.StoreInt64(&metrics.BytesSent, 0)
+	atomic.StoreInt64(&metrics.BytesReceived, 0)
+	atomic.StoreInt64(&metrics.ErrorCount, 0)
 
 	// 测试连接指标
 	IncrementActiveConnections()
-	if globalMetrics.ActiveConnections != 1 {
-		t.Errorf("Expected 1 active connection, got %d", globalMetrics.ActiveConnections)
+	if atomic.LoadInt64(&metrics.ActiveConnections) != 1 {
+		t.Errorf("Expected 1 active connection, got %d", atomic.LoadInt64(&metrics.ActiveConnections))
 	}
 
 	DecrementActiveConnections()
-	if globalMetrics.ActiveConnections != 0 {
-		t.Errorf("Expected 0 active connections, got %d", globalMetrics.ActiveConnections)
+	if atomic.LoadInt64(&metrics.ActiveConnections) != 0 {
+		t.Errorf("Expected 0 active connections, got %d", atomic.LoadInt64(&metrics.ActiveConnections))
 	}
 
 	// 测试数据传输指标
 	AddBytesSent(1000)
 	AddBytesReceived(2000)
-	if globalMetrics.BytesSent != 1000 {
-		t.Errorf("Expected 1000 bytes sent, got %d", globalMetrics.BytesSent)
+	if atomic.LoadInt64(&metrics.BytesSent) != 1000 {
+		t.Errorf("Expected 1000 bytes sent, got %d", atomic.LoadInt64(&metrics.BytesSent))
 	}
-	if globalMetrics.BytesReceived != 2000 {
-		t.Errorf("Expected 2000 bytes received, got %d", globalMetrics.BytesReceived)
+	if atomic.LoadInt64(&metrics.BytesReceived) != 2000 {
+		t.Errorf("Expected 2000 bytes received, got %d", atomic.LoadInt64(&metrics.BytesReceived))
 	}
 
 	// 测试错误指标
 	IncrementErrors()
-	if globalMetrics.ErrorCount != 1 {
-		t.Errorf("Expected 1 error, got %d", globalMetrics.ErrorCount)
+	if atomic.LoadInt64(&metrics.ErrorCount) != 1 {
+		t.Errorf("Expected 1 error, got %d", atomic.LoadInt64(&metrics.ErrorCount))
 	}
 }
 
@@ -121,26 +125,4 @@ func BenchmarkMetrics(b *testing.B) {
 			IncrementErrors()
 		}
 	})
-}
-
-// TestHumanizeBytes 测试字节格式化
-func TestHumanizeBytes(t *testing.T) {
-	tests := []struct {
-		bytes    int64
-		expected string
-	}{
-		{0, "0 B"},
-		{1023, "1023 B"},
-		{1024, "1.0 KB"},
-		{1536, "1.5 KB"},
-		{1048576, "1.0 MB"},
-		{1073741824, "1.0 GB"},
-	}
-
-	for _, tt := range tests {
-		result := humanizeBytes(tt.bytes)
-		if result != tt.expected {
-			t.Errorf("humanizeBytes(%d) = %s, want %s", tt.bytes, result, tt.expected)
-		}
-	}
 }

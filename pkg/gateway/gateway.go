@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/common/message"
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -161,6 +162,9 @@ func (g *Gateway) extractGroupFromUsername(username string) string {
 func (g *Gateway) Start() error {
 	logger.Info("Starting gateway server", "listen_addr", g.config.ListenAddr, "proxy_count", len(g.proxies))
 
+	// 🆕 Start monitoring data cleanup process
+	monitoring.StartCleanupProcess()
+
 	// 🆕 Check and configure TLS
 	var tlsConfig *tls.Config
 	if g.config.TLSCert != "" && g.config.TLSKey != "" {
@@ -296,6 +300,9 @@ func (g *Gateway) Stop() error {
 		logger.Warn("Timeout waiting for gateway goroutines to finish")
 	}
 
+	// 🆕 Stop monitoring data cleanup process
+	monitoring.StopCleanupProcess()
+
 	logger.Info("Gateway shutdown completed", "final_client_count", clientCount)
 
 	return nil
@@ -364,6 +371,9 @@ func (g *Gateway) addClient(client *ClientConn) {
 	// Fix: Add to ordered list
 	g.groupClients[client.GroupID] = append(g.groupClients[client.GroupID], client.ID)
 
+	// 🆕 Update client metrics when client connects
+	monitoring.UpdateClientMetrics(client.ID, client.GroupID, 0, 0, false)
+
 	groupSize := len(g.groups[client.GroupID])
 	totalClients := len(g.clients)
 	logger.Debug("Client added successfully", "client_id", client.ID, "group_id", client.GroupID, "group_size", groupSize, "total_clients", totalClients)
@@ -383,6 +393,9 @@ func (g *Gateway) removeClient(clientID string) {
 	// Clean up port forwarding for the client
 	logger.Debug("Closing port forwarding for client", "client_id", clientID)
 	g.portForwardMgr.CloseClientPorts(clientID)
+
+	// 🆕 Mark client as offline immediately in monitoring metrics
+	monitoring.MarkClientOffline(clientID)
 
 	delete(g.clients, clientID)
 	delete(g.groups[client.GroupID], clientID)
@@ -431,8 +444,10 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 		if client, exists := g.clients[clientID]; exists {
 			// Update counter to next position
 			g.groupCounters[groupID] = (idx + 1) % len(clients)
+			logger.Info("Round-robin client selection", "group_id", groupID, "selected_client", clientID, "counter_before", counter, "counter_after", g.groupCounters[groupID], "total_clients", len(clients), "available_clients", clients)
 			return client, nil
 		}
+		logger.Warn("Client not found in clients map during round-robin", "group_id", groupID, "target_client", clientID, "counter", counter, "idx", idx, "total_clients", len(clients), "available_clients", clients)
 	}
 
 	return nil, fmt.Errorf("no healthy clients available in group: %s", groupID)

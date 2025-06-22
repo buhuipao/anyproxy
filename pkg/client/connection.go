@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"reflect"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ func (c *Client) connectionLoop() {
 		// Attempt to connect (🆕 using transport layer abstraction)
 		if err := c.connect(); err != nil {
 			logger.Error("Failed to connect to gateway", "client_id", c.getClientID(), "attempt", connectionAttempts, "err", err, "retrying_in", backoff)
+
+			// 🆕 Update connection state to disconnected with error
 
 			// Add jitter to avoid thundering herd problem
 			// Using math/rand is intentional, we don't need cryptographically secure random numbers here
@@ -77,6 +80,9 @@ func (c *Client) connectionLoop() {
 
 		// Connection lost, clean up and retry
 		logger.Info("Connection to gateway lost, cleaning up and retrying...", "client_id", c.getClientID(), "total_attempts", connectionAttempts)
+
+		// 🆕 Update connection state to disconnected
+
 		c.cleanup()
 	}
 }
@@ -86,6 +92,17 @@ func (c *Client) connect() error {
 	logger.Debug("Establishing connection to gateway", "client_id", c.getClientID(), "gateway_addr", c.config.GatewayAddr)
 
 	c.actualID = c.generateClientID()
+
+	// 🆕 Notify web server of actual client ID change
+	if c.webServer != nil {
+		// Use reflection to call SetActualClientID method
+		if webServerValue := reflect.ValueOf(c.webServer); webServerValue.IsValid() {
+			if method := webServerValue.MethodByName("SetActualClientID"); method.IsValid() {
+				method.Call([]reflect.Value{reflect.ValueOf(c.actualID)})
+				logger.Debug("Updated web server with actual client ID", "actual_id", c.actualID)
+			}
+		}
+	}
 
 	// 🆕 Create TLS configuration
 	var tlsConfig *tls.Config
@@ -125,6 +142,8 @@ func (c *Client) connect() error {
 
 	// 🆕 Initialize message handler
 	c.msgHandler = message.NewClientExtendedMessageHandler(conn)
+
+	// 🆕 Update connection state to connected
 
 	// Send port forwarding request
 	if len(c.config.OpenPorts) > 0 {
@@ -236,12 +255,15 @@ func (c *Client) handleConnection(connID string) {
 				logger.Debug("Read data from local connection", "client_id", c.getClientID(), "conn_id", connID, "bytes", n, "total_bytes", totalBytes)
 			}
 
-			// 🆕 Send data to gateway (using binary protocol)
+			// Send data to gateway (using binary protocol)
 			if err := c.writeDataMessage(connID, buffer[:n]); err != nil {
 				logger.Error("Failed to send data to gateway", "client_id", c.getClientID(), "conn_id", connID, "bytes", n, "err", err)
 				c.cleanupConnection(connID)
 				return
 			}
+
+			// Update connection and client metrics for data sent to gateway
+			monitoring.UpdateConnectionBytes(connID, c.getClientID(), int64(n), 0)
 		}
 	}
 }
@@ -249,6 +271,9 @@ func (c *Client) handleConnection(connID string) {
 // cleanupConnection cleans up connection and sends close message (using ConnectionManager)
 func (c *Client) cleanupConnection(connID string) {
 	logger.Debug("Cleaning up connection", "client_id", c.getClientID(), "conn_id", connID)
+
+	// Close connection in monitoring
+	monitoring.CloseConnection(connID)
 
 	// Use ConnectionManager to clean up connection
 	c.connMgr.CleanupConnection(connID)

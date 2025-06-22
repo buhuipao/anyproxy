@@ -29,13 +29,21 @@ gateway:
   tls_key: "certs/server.key"
   auth_username: "gateway_user"
   auth_password: "gateway_password"
+  web:
+    enabled: true
+    listen_addr: ":8090"
+    static_dir: "web/gateway/static"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
+    session_key: "change-this-secret-key"
 
 client:
   gateway_addr: "127.0.0.1:8443"
   gateway_tls_cert: "certs/server.crt"
   client_id: "client"
   # group_id: "example-group"
-  replicas: 1
+  replicas: 3
   auth_username: "gateway_user"
   auth_password: "gateway_password"
   forbidden_hosts:
@@ -58,3 +66,7 @@ client:
       protocol: "udp"
       local_port: 22
       local_host: "192.168.1.1"
+  web:
+    enabled: true
+    listen_addr: ":8091"
+    static_dir: "web/client/static"

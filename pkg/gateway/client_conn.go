@@ -155,6 +155,10 @@ func (c *ClientConn) dialNetwork(ctx context.Context, network, addr string) (net
 	connCount := len(c.Conns)
 	c.connMu.Unlock()
 
+	// 🆕 Update connection metrics when connection is established
+	// Register connection with monitoring
+	monitoring.CreateConnection(connID, c.ID, addr)
+
 	logger.Debug("Connection registered", "client_id", c.ID, "conn_id", connID, "total_connections", connCount)
 
 	// 🆕 Send connection request to client (adapted to transport layer)
@@ -357,9 +361,11 @@ func (c *ClientConn) handleDataMessage(msg map[string]interface{}) {
 	// Safely get connection
 	c.connMu.RLock()
 	proxyConn, ok := c.Conns[connID]
+	totalConns := len(c.Conns)
 	c.connMu.RUnlock()
 	if !ok {
-		logger.Warn("Data message for unknown connection", "client_id", c.ID, "conn_id", connID, "data_bytes", len(data))
+		logger.Warn("Data message for unknown connection - possible connection cleanup race", "client_id", c.ID, "conn_id", connID, "data_bytes", len(data), "active_connections", totalConns)
+		// Do NOT update metrics for non-existent connections to avoid phantom data
 		return
 	}
 
@@ -375,9 +381,13 @@ func (c *ClientConn) handleDataMessage(msg map[string]interface{}) {
 	n, err := proxyConn.LocalConn.Write(data)
 	if err != nil {
 		logger.Error("Failed to write data to local connection", "client_id", c.ID, "conn_id", connID, "data_bytes", len(data), "written_bytes", n, "err", err)
+		// Do NOT update metrics for failed writes to avoid double counting
 		c.closeConnection(connID)
 		return
 	}
+
+	// ONLY update metrics on successful write - this is the single source of truth
+	monitoring.UpdateConnectionBytes(connID, c.ID, 0, int64(n))
 
 	// Only log larger transfers
 	if n > 10000 {
@@ -420,6 +430,9 @@ func (c *ClientConn) closeConnection(connID string) {
 		logger.Debug("Connection already removed", "conn_id", connID, "client_id", c.ID)
 		return
 	}
+
+	// Close connection in monitoring
+	monitoring.CloseConnection(connID)
 
 	// Signal connection to stop (non-blocking, idempotent)
 	select {
@@ -548,6 +561,9 @@ func (c *ClientConn) handleConnection(proxyConn *Conn) {
 				c.closeConnection(proxyConn.ID)
 				return
 			}
+
+			// Update connection metrics for data sent back to client (only after successful send)
+			monitoring.UpdateConnectionBytes(proxyConn.ID, c.ID, int64(n), 0)
 
 			// Only log larger transfers
 			if n > 10000 {

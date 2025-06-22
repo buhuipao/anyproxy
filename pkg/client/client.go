@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -39,6 +40,9 @@ type Client struct {
 	// Enhanced host pattern matching
 	forbiddenHostPatterns []*HostPattern // Enhanced forbidden host patterns
 	allowedHostPatterns   []*HostPattern // Enhanced allowed host patterns
+
+	// 🆕 Added for web server integration
+	webServer interface{}
 }
 
 // NewClient creates a new proxy client
@@ -108,6 +112,9 @@ func (c *Client) Start() error {
 	// Start performance metrics reporter (report every 30 seconds)
 	monitoring.StartMetricsReporter(30 * time.Second)
 
+	// 🆕 Start monitoring data cleanup process
+	monitoring.StartCleanupProcess()
+
 	// Start main connection loop
 	c.wg.Add(1)
 	go func() {
@@ -176,7 +183,36 @@ func (c *Client) Stop() error {
 	// Stop metrics reporter
 	monitoring.StopMetricsReporter()
 
+	// 🆕 Stop monitoring data cleanup process
+	monitoring.StopCleanupProcess()
+
 	logger.Info("Client shutdown completed", "client_id", c.getClientID(), "connections_closed", connectionCount)
 
 	return nil
+}
+
+// UpdateClientMetrics updates client-specific metrics
+func (c *Client) UpdateClientMetrics(bytesSent, bytesReceived int64, isError bool) {
+	// 🆕 Use the actual client ID instead of configured prefix
+	actualClientID := c.actualID
+	if actualClientID == "" {
+		actualClientID = c.config.ClientID // Fallback to config
+	}
+
+	monitoring.UpdateClientMetrics(actualClientID, c.config.GroupID, bytesSent, bytesReceived, isError)
+
+	// 🆕 Update web server with actual client ID if web is enabled
+	if c.webServer != nil {
+		// Use reflection to call SetActualClientID method
+		if webServerValue := reflect.ValueOf(c.webServer); webServerValue.IsValid() {
+			if method := webServerValue.MethodByName("SetActualClientID"); method.IsValid() {
+				method.Call([]reflect.Value{reflect.ValueOf(actualClientID)})
+			}
+		}
+	}
+}
+
+// SetWebServer sets the web server reference for client ID updates
+func (c *Client) SetWebServer(webServer interface{}) {
+	c.webServer = webServer
 }

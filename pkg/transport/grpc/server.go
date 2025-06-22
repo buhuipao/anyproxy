@@ -79,13 +79,13 @@ func (t *grpcTransport) listenAndServe(addr string, handler func(transport.Conne
 	// Create gRPC server options
 	var opts []grpc.ServerOption
 
-	// 🚨 Fix: Configure gRPC server-side keepalive parameters to prevent unexpected connection drops
+	// Configure gRPC server-side keepalive parameters to prevent unexpected connection drops
 	opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{
-		MaxConnectionIdle:     5 * time.Minute,  // Close connection after 5 minutes idle
-		MaxConnectionAge:      30 * time.Minute, // Maximum connection lifetime of 30 minutes
-		MaxConnectionAgeGrace: 30 * time.Second, // Connection close grace period of 30 seconds
-		Time:                  30 * time.Second, // Server keepalive sending interval
-		Timeout:               5 * time.Second,  // Keepalive response timeout
+		MaxConnectionIdle:     24 * time.Hour,     // Close connection after 24 hours idle
+		MaxConnectionAge:      7 * 24 * time.Hour, // Maximum connection lifetime of 7 days
+		MaxConnectionAgeGrace: 5 * time.Minute,    // Connection close grace period of 5 minutes
+		Time:                  30 * time.Second,   // Server keepalive sending interval
+		Timeout:               5 * time.Second,    // Keepalive response timeout
 	}))
 
 	// Configure client keepalive policy

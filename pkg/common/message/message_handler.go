@@ -5,7 +5,6 @@ package message
 import (
 	"fmt"
 
-	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 )
 
@@ -96,9 +95,6 @@ func (h *BinaryMessageHandler) parseClientMessage(msgType byte, data []byte) (ma
 			return nil, err
 		}
 
-		// Update received bytes count
-		monitoring.AddBytesReceived(int64(len(payload)))
-
 		return map[string]interface{}{
 			"type":       protocol.MsgTypeData,
 			"id":         connID,
@@ -167,9 +163,6 @@ func (h *BinaryMessageHandler) parseGatewayMessage(msgType byte, data []byte) (m
 			return nil, err
 		}
 
-		// Update received bytes count
-		monitoring.AddBytesReceived(int64(len(payload)))
-
 		return map[string]interface{}{
 			"type":       protocol.MsgTypeData,
 			"id":         connID,
@@ -236,9 +229,6 @@ func (h *BinaryMessageHandler) parseGatewayMessage(msgType byte, data []byte) (m
 func (h *BinaryMessageHandler) WriteDataMessage(connID string, data []byte) error {
 	// Use binary format
 	binaryMsg := protocol.PackDataMessage(connID, data)
-
-	// Update sent bytes count
-	monitoring.AddBytesSent(int64(len(data)))
 
 	return h.conn.WriteMessage(binaryMsg)
 }

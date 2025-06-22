@@ -68,7 +68,7 @@ func (c *Client) routeMessage(msg map[string]interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			if connID, ok := msg["id"].(string); ok {
-				logger.Debug("Recovered from panic in routeMessage - channel likely closed during send", "client_id", c.getClientID(), "conn_id", connID)
+				logger.Error("Recovered from panic in routeMessage - channel likely closed during send", "client_id", c.getClientID(), "conn_id", connID)
 			}
 		}
 	}()
@@ -229,8 +229,8 @@ func (c *Client) handleConnectMessage(msg map[string]interface{}) {
 	c.connMgr.AddConnection(connID, conn)
 	connectionCount := c.connMgr.GetConnectionCount()
 
-	// Update metrics
-	monitoring.IncrementActiveConnections()
+	// Create connection record in monitoring
+	monitoring.CreateConnection(connID, c.getClientID(), address)
 
 	logger.Debug("Connection registered", "client_id", c.getClientID(), "conn_id", connID, "total_connections", connectionCount)
 
@@ -299,7 +299,8 @@ func (c *Client) handleDataMessage(msg map[string]interface{}) {
 	// Get connection (using ConnectionManager)
 	conn, ok := c.connMgr.GetConnection(connID)
 	if !ok {
-		logger.Warn("Data message for unknown connection", "client_id", c.getClientID(), "conn_id", connID, "data_bytes", len(data))
+		logger.Warn("Data message for unknown connection - possible connection cleanup race", "client_id", c.getClientID(), "conn_id", connID, "data_bytes", len(data), "active_connections", c.connMgr.GetConnectionCount())
+		// Do NOT update metrics for non-existent connections to avoid phantom data
 		return
 	}
 
@@ -314,10 +315,14 @@ func (c *Client) handleDataMessage(msg map[string]interface{}) {
 
 	n, err := conn.Write(data)
 	if err != nil {
-		logger.Error("Failed to write data to target connection", "client_id", c.getClientID(), "conn_id", connID, "data_bytes", len(data), "written_bytes", n, "err", err)
+		logger.Error("Failed to write data to target connection", "client_id", c.getClientID(), "conn_id", connID, "data_bytes", len(data), "written_bytes", n, "err", err, "total_connections", c.connMgr.GetConnectionCount())
+		// Do NOT update metrics for failed writes to avoid double counting
 		c.cleanupConnection(connID)
 		return
 	}
+
+	// ONLY update metrics on successful write - this is the single source of truth
+	monitoring.UpdateConnectionBytes(connID, c.getClientID(), 0, int64(n))
 
 	// Only log larger transfers
 	if n > 10000 {

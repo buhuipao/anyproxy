@@ -10,6 +10,7 @@ import (
 	"time"
 
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
@@ -415,6 +416,10 @@ func (pm *PortForwardManager) handleUDPPacket(portListener *PortListener, data [
 		return
 	}
 
+	// Create connection record for UDP port forwarding (outbound data)
+	monitoring.CreateConnection(connID, portListener.ClientID, fmt.Sprintf("udp-port-forward:%d->%s", portListener.Port, targetAddr))
+	monitoring.UpdateConnectionBytes(connID, portListener.ClientID, int64(len(data)), 0)
+
 	// Fix: Handle UDP response asynchronously to avoid unnecessary waiting
 	// Create a goroutine to wait for response, main function returns immediately
 	go func() {
@@ -444,6 +449,9 @@ func (pm *PortForwardManager) handleUDPPacket(portListener *PortListener, data [
 			return
 		}
 
+		// Update monitoring statistics for UDP port forwarding (inbound response data)
+		monitoring.UpdateConnectionBytes(connID, portListener.ClientID, 0, int64(n))
+
 		logger.Debug("UDP response forwarded successfully", "port", portListener.Port, "client_addr", clientAddr, "target", targetAddr, "response_size", n, "response_time", timeout)
 	}()
 
@@ -467,6 +475,14 @@ func (pm *PortForwardManager) handleForwardedConnection(portListener *PortListen
 
 	logger.Info("New port forwarding connection", "port", portListener.Port, "client_id", portListener.ClientID, "conn_id", connID, "target", targetAddr, "remote_addr", incomingConn.RemoteAddr())
 
+	// Create connection record for port forwarding
+	monitoring.CreateConnection(connID, portListener.ClientID, fmt.Sprintf("port-forward:%d->%s", portListener.Port, targetAddr))
+
+	defer func() {
+		// Close connection when port forwarding ends
+		monitoring.CloseConnection(connID)
+	}()
+
 	// Connect to target (using client's dial function)
 	clientConn, err := portListener.Client.dialNetwork(ctx, protocol.ProtocolTCP, targetAddr)
 	if err != nil {
@@ -486,25 +502,25 @@ func (pm *PortForwardManager) handleForwardedConnection(portListener *PortListen
 	defer cancel()
 
 	// Start bidirectional data transfer
-	pm.transferData(ctx, incomingConn, clientConn, portListener.Port)
+	pm.transferData(ctx, incomingConn, clientConn, portListener.Port, connID, portListener.ClientID)
 }
 
 // transferData handles bidirectional data transfer
-func (pm *PortForwardManager) transferData(ctx context.Context, conn1, conn2 net.Conn, port int) {
+func (pm *PortForwardManager) transferData(ctx context.Context, conn1, conn2 net.Conn, port int, connID, clientID string) {
 	var wg sync.WaitGroup
 
 	// Copy from conn1 to conn2
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pm.copyDataWithContext(ctx, conn1, conn2, "incoming->client", port)
+		pm.copyDataWithContext(ctx, conn1, conn2, "incoming->client", port, connID, clientID)
 	}()
 
 	// Copy from conn2 to conn1
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pm.copyDataWithContext(ctx, conn2, conn1, "client->incoming", port)
+		pm.copyDataWithContext(ctx, conn2, conn1, "client->incoming", port, connID, clientID)
 	}()
 
 	// Wait for completion or context cancellation
@@ -523,7 +539,7 @@ func (pm *PortForwardManager) transferData(ctx context.Context, conn1, conn2 net
 }
 
 // copyDataWithContext copies data between connections
-func (pm *PortForwardManager) copyDataWithContext(ctx context.Context, dst, src net.Conn, direction string, port int) {
+func (pm *PortForwardManager) copyDataWithContext(ctx context.Context, dst, src net.Conn, direction string, port int, connID, clientID string) {
 	buffer := make([]byte, 32*1024) // 32KB buffer to match other components
 	totalBytes := int64(0)
 
@@ -566,6 +582,15 @@ func (pm *PortForwardManager) copyDataWithContext(ctx context.Context, dst, src 
 			if writeErr != nil {
 				logger.Error("Port forward write error", "direction", direction, "port", port, "err", writeErr, "transferred_bytes", totalBytes)
 				return
+			}
+
+			// Update monitoring statistics for port forwarding traffic
+			if strings.Contains(direction, "incoming->client") {
+				// Data from external client to internal service (bytes received by the proxy)
+				monitoring.UpdateConnectionBytes(connID, clientID, 0, int64(n))
+			} else {
+				// Data from internal service to external client (bytes sent by the proxy)
+				monitoring.UpdateConnectionBytes(connID, clientID, int64(n), 0)
 			}
 		}
 

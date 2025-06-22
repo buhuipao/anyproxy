@@ -10,8 +10,11 @@ import (
 	"syscall"
 
 	"github.com/buhuipao/anyproxy/pkg/client"
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
+	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	clientWeb "github.com/buhuipao/anyproxy/web/client"
 )
 
 func main() {
@@ -32,6 +35,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 🆕 Start monitoring cleanup process
+	monitoring.StartCleanupProcess()
+	logger.Info("Monitoring cleanup process started")
+
+	// Initialize web services if enabled
+	var webServer *clientWeb.WebServer
+	if cfg.Client.Web.Enabled {
+		// Initialize rate limiter (without storage)
+		rateLimiter := ratelimit.NewRateLimiter(nil)
+
+		// Create web server
+		webServer = clientWeb.NewClientWebServer(cfg.Client.Web.ListenAddr, cfg.Client.Web.StaticDir, cfg.Client.ClientID, rateLimiter)
+
+		// Start web server in a separate goroutine
+		go func() {
+			if err := webServer.Start(); err != nil {
+				logger.Error("Client web server failed", "err", err)
+			}
+		}()
+
+		logger.Info("Client web server started", "listen_addr", cfg.Client.Web.ListenAddr)
+	}
+
 	var clients []*client.Client
 	for i := 0; i < cfg.Client.Replicas; i++ {
 		// Create and start client (using WebSocket transport layer)
@@ -40,6 +66,11 @@ func main() {
 		if err != nil {
 			logger.Error("Failed to create client", "replica_idx", i, "err", err)
 			os.Exit(1)
+		}
+
+		// 🆕 Set web server reference in client for ID updates
+		if webServer != nil {
+			proxyClient.SetWebServer(webServer)
 		}
 
 		// Start client (non-blocking)
@@ -59,6 +90,13 @@ func main() {
 	// Wait for termination signal
 	<-sigCh
 	logger.Info("Shutting down...")
+
+	// Stop web server if running
+	if webServer != nil {
+		if err := webServer.Stop(); err != nil {
+			logger.Error("Error shutting down web server", "err", err)
+		}
+	}
 
 	// Stop all clients concurrently
 	var stopWg sync.WaitGroup

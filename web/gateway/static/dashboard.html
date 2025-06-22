@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnyProxy Gateway Dashboard</title>
+    <meta data-i18n-document-title="dashboard.title">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f6fa; color: #2c3e50; 
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; padding: 20px 0; box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+        .header h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px; margin: 30px 0;
+        }
+        .stat-card {
+            background: white; padding: 25px; border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center;
+        }
+        .stat-card h3 { color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px; }
+        .stat-card .value { font-size: 2.5rem; font-weight: bold; color: #2c3e50; }
+        .table-container {
+            background: white; border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; margin: 20px 0;
+        }
+        .table { width: 100%; border-collapse: collapse; }
+        .table th, .table td { padding: 15px; text-align: left; border-bottom: 1px solid #e1e8ed; }
+        .table th { background: #f8f9fa; font-weight: 600; }
+        .status-active { background: #d4edda; color: #155724; padding: 4px 12px; border-radius: 20px; }
+        .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+        .btn-primary { background: #667eea; color: white; }
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .lang-switch {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        .lang-switch:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .user-info span {
+            opacity: 0.9;
+        }
+        .btn-logout {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            font-size: 0.9rem;
+        }
+        .btn-logout:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        /* 🆕 Auto-refresh controls */
+        .auto-refresh-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255,255,255,0.1);
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 0.85rem;
+        }
+        .auto-refresh-control input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        .refresh-status {
+            opacity: 0.8;
+        }
+        /* 🆕 Floating refresh button */
+        .floating-refresh {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            padding: 15px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+            z-index: 1000;
+            transition: all 0.3s ease;
+        }
+        .floating-refresh:hover {
+            background: #5a67d8;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 25px rgba(102, 126, 234, 0.4);
+        }
+        .floating-refresh::before {
+            content: "🔄";
+            margin-right: 8px;
+        }
+        .auto-refreshing {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="container">
+            <div class="header-content">
+                <div>
+                    <h1 data-i18n="dashboard.title">AnyProxy Gateway Dashboard</h1>
+                </div>
+                <div class="header-controls">
+                    <div class="auto-refresh-control">
+                        <label>
+                            <input type="checkbox" id="autoRefresh" checked>
+                            <span data-i18n="common.auto_refresh">Auto Refresh (10s)</span>
+                        </label>
+                        <span class="refresh-status" id="refreshStatus">●</span>
+                    </div>
+                    <button class="lang-switch" onclick="window.i18n.toggleLanguage()" data-i18n="common.language_switch">中文</button>
+                    <div class="user-info" id="userInfo" style="display: none;">
+                        <span><span data-i18n="dashboard.welcome">Welcome, </span><span id="username"></span></span>
+                        <button class="btn btn-logout" onclick="logout()" data-i18n="dashboard.logout">Logout</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3 data-i18n="metrics.active_connections">Active Connections</h3>
+                <div class="value" id="active-connections">0</div>
+            </div>
+            <div class="stat-card">
+                <h3 data-i18n="metrics.total_connections">Total Connections</h3>
+                <div class="value" id="total-connections">0</div>
+            </div>
+            <div class="stat-card">
+                <h3 data-i18n="metrics.bytes_sent">Data Sent</h3>
+                <div class="value" id="bytes-sent">0 B</div>
+            </div>
+            <div class="stat-card">
+                <h3 data-i18n="metrics.bytes_received">Data Received</h3>
+                <div class="value" id="bytes-received">0 B</div>
+            </div>
+            <div class="stat-card">
+                <h3 data-i18n="metrics.success_rate">Success Rate</h3>
+                <div class="value" id="success-rate">100%</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <div style="padding: 20px; display: flex; justify-content: space-between; align-items: center;">
+                <h3 data-i18n="clients.title">Client Status</h3>
+                <div class="client-filter">
+                    <label>
+                        <input type="checkbox" id="showOfflineClients">
+                        <span data-i18n="clients.show_offline">Show Offline Clients</span>
+                    </label>
+                </div>
+            </div>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th data-i18n="clients.client_id">Client ID</th>
+                        <th data-i18n="clients.active_connections">Active Connections</th>
+                        <th data-i18n="clients.data_sent">Data Sent</th>
+                        <th data-i18n="clients.data_received">Data Received</th>
+                        <th data-i18n="clients.status">Status</th>
+                    </tr>
+                </thead>
+                <tbody id="clients-table">
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: #666;" data-i18n="common.loading">Loading...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 🆕 Floating refresh button -->
+    <button class="floating-refresh" onclick="refreshData()" data-i18n="common.refresh">Refresh</button>
+
+    <script src="/js/i18n.js"></script>
+    <script>
+        let autoRefreshEnabled = true;
+        let refreshInterval;
+
+        // Add translation for auto refresh
+        if (window.i18n && window.i18n.translations) {
+            window.i18n.translations.en['common.auto_refresh'] = 'Auto Refresh (10s)';
+            window.i18n.translations.zh['common.auto_refresh'] = '自动刷新 (10秒)';
+            window.i18n.translations.en['clients.show_offline'] = 'Show Offline Clients';
+            window.i18n.translations.zh['clients.show_offline'] = '显示离线客户端';
+        }
+
+        // Check authentication status
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/check');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.authenticated) {
+                        document.getElementById('username').textContent = data.username;
+                        document.getElementById('userInfo').style.display = 'flex';
+                        return true;
+                    }
+                }
+                // Not authenticated, redirect to login page
+                window.location.href = '/login.html';
+                return false;
+            } catch (error) {
+                console.error('Auth check failed:', error);
+                window.location.href = '/login.html';
+                return false;
+            }
+        }
+
+        // Logout functionality
+        async function logout() {
+            try {
+                await fetch('/api/auth/logout', { method: 'POST' });
+            } catch (error) {
+                console.error('Logout failed:', error);
+            }
+            window.location.href = '/login.html';
+        }
+
+        // Handle API errors
+        function handleApiError(error, response) {
+            if (response && response.status === 401) {
+                // Authentication failed, redirect to login page
+                window.location.href = '/login.html';
+                return;
+            }
+            console.error('API error:', error);
+        }
+
+        // Load global metrics
+        async function loadGlobalMetrics() {
+            try {
+                const response = await fetch('/api/metrics/global');
+                if (!response.ok) {
+                    handleApiError(null, response);
+                    return;
+                }
+                const data = await response.json();
+                
+                document.getElementById('active-connections').textContent = data.active_connections;
+                document.getElementById('total-connections').textContent = data.total_connections;
+                document.getElementById('bytes-sent').textContent = window.i18n.formatBytes(data.bytes_sent);
+                document.getElementById('bytes-received').textContent = window.i18n.formatBytes(data.bytes_received);
+                document.getElementById('success-rate').textContent = data.success_rate.toFixed(1) + '%';
+            } catch (error) {
+                handleApiError(error);
+            }
+        }
+
+        // Load client data
+        async function loadClients() {
+            try {
+                const response = await fetch('/api/metrics/clients');
+                if (!response.ok) {
+                    handleApiError(null, response);
+                    return;
+                }
+                const data = await response.json();
+                const tbody = document.getElementById('clients-table');
+                const showOfflineClients = document.getElementById('showOfflineClients').checked;
+                
+                if (Object.keys(data).length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #666;">${window.i18n.t('clients.no_clients')}</td></tr>`;
+                    return;
+                }
+                
+                tbody.innerHTML = '';
+                let visibleClientCount = 0;
+                
+                Object.entries(data).forEach(([clientId, metrics]) => {
+                    const isActive = metrics.is_online !== undefined ? metrics.is_online : 
+                                    (new Date() - new Date(metrics.last_seen) < 300000); // 5 minutes
+                    
+                    // Filter offline clients if not requested to show them
+                    if (!isActive && !showOfflineClients) {
+                        return;
+                    }
+                    
+                    visibleClientCount++;
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${clientId}</td>
+                        <td>${metrics.active_connections}</td>
+                        <td>${window.i18n.formatBytes(metrics.bytes_sent || 0)}</td>
+                        <td>${window.i18n.formatBytes(metrics.bytes_received || 0)}</td>
+                        <td><span class="${isActive ? 'status-active' : ''}">${isActive ? window.i18n.t('common.online') : window.i18n.t('common.offline')}</span></td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                
+                // Show message if no clients are visible after filtering
+                if (visibleClientCount === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #666;">${showOfflineClients ? window.i18n.t('clients.no_clients') : window.i18n.t('clients.no_online_clients')}</td></tr>`;
+                }
+            } catch (error) {
+                handleApiError(error);
+            }
+        }
+
+        // Refresh all data
+        function refreshData() {
+            const refreshButton = document.querySelector('.floating-refresh');
+            const refreshStatus = document.getElementById('refreshStatus');
+            
+            // Add visual feedback
+            refreshButton.classList.add('auto-refreshing');
+            refreshStatus.style.color = '#4CAF50';
+            
+            loadGlobalMetrics();
+            loadClients();
+            
+            // Remove visual feedback after a short delay
+            setTimeout(() => {
+                refreshButton.classList.remove('auto-refreshing');
+                refreshStatus.style.color = '';
+            }, 1000);
+        }
+
+        // Setup auto refresh
+        function setupAutoRefresh() {
+            const checkbox = document.getElementById('autoRefresh');
+            const refreshStatus = document.getElementById('refreshStatus');
+            const showOfflineCheckbox = document.getElementById('showOfflineClients');
+            
+            checkbox.addEventListener('change', function() {
+                autoRefreshEnabled = this.checked;
+                
+                if (autoRefreshEnabled) {
+                    refreshInterval = setInterval(refreshData, 10000);
+                    refreshStatus.style.color = '#4CAF50';
+                } else {
+                    if (refreshInterval) {
+                        clearInterval(refreshInterval);
+                    }
+                    refreshStatus.style.color = '#999';
+                }
+            });
+            
+            // Add event listener for offline clients filter
+            showOfflineCheckbox.addEventListener('change', function() {
+                loadClients(); // Reload clients when filter changes
+            });
+            
+            // Start auto refresh if enabled
+            if (autoRefreshEnabled) {
+                refreshInterval = setInterval(refreshData, 10000);
+                refreshStatus.style.color = '#4CAF50';
+            }
+        }
+
+        // Initialize page on load
+        document.addEventListener('DOMContentLoaded', async function() {
+            // First check authentication status
+            const isAuthenticated = await checkAuth();
+            if (isAuthenticated) {
+                refreshData();
+                setupAutoRefresh();
+            }
+        });
+    </script>
+</body>
+</html> 

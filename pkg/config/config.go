@@ -39,11 +39,12 @@ type ProxyConfig struct {
 
 // GatewayConfig represents the configuration for the proxy gateway
 type GatewayConfig struct {
-	ListenAddr   string `yaml:"listen_addr"`
-	TLSCert      string `yaml:"tls_cert"`
-	TLSKey       string `yaml:"tls_key"`
-	AuthUsername string `yaml:"auth_username"`
-	AuthPassword string `yaml:"auth_password"`
+	ListenAddr   string    `yaml:"listen_addr"`
+	TLSCert      string    `yaml:"tls_cert"`
+	TLSKey       string    `yaml:"tls_key"`
+	AuthUsername string    `yaml:"auth_username"`
+	AuthPassword string    `yaml:"auth_password"`
+	Web          WebConfig `yaml:"web"`
 }
 
 // SOCKS5Config represents the configuration for the SOCKS5 proxy
@@ -102,6 +103,19 @@ type ClientConfig struct {
 	ForbiddenHosts []string   `yaml:"forbidden_hosts"`
 	AllowedHosts   []string   `yaml:"allowed_hosts"`
 	OpenPorts      []OpenPort `yaml:"open_ports"`
+	Web            WebConfig  `yaml:"web"`
+}
+
+// WebConfig represents the configuration for the web management interface
+type WebConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	ListenAddr string `yaml:"listen_addr"`
+	StaticDir  string `yaml:"static_dir"`
+	// Authentication settings
+	AuthEnabled  bool   `yaml:"auth_enabled"`
+	AuthUsername string `yaml:"auth_username"`
+	AuthPassword string `yaml:"auth_password"`
+	SessionKey   string `yaml:"session_key"`
 }
 
 var conf *Config
