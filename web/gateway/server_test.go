@@ -322,7 +322,7 @@ func TestWebServer_HandleLogin(t *testing.T) {
 			cookies := rr.Result().Cookies()
 			hasCookie := false
 			for _, cookie := range cookies {
-				if cookie.Name == "session_id" && cookie.Value != "" {
+				if cookie.Name == "gateway_session_id" && cookie.Value != "" {
 					hasCookie = true
 					break
 				}
@@ -387,7 +387,7 @@ func TestWebServer_HandleLogout(t *testing.T) {
 				cookies := rr.Result().Cookies()
 				cleared := false
 				for _, cookie := range cookies {
-					if cookie.Name == "session_id" && cookie.Value == "" {
+					if cookie.Name == "gateway_session_id" && cookie.Value == "" {
 						cleared = true
 						break
 					}
@@ -438,7 +438,7 @@ func TestWebServer_HandleAuthCheck(t *testing.T) {
 
 	req = httptest.NewRequest("GET", "/api/auth/check", nil)
 	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
+		Name:  "gateway_session_id",
 		Value: session.ID,
 	})
 	rr = httptest.NewRecorder()
@@ -578,7 +578,7 @@ func TestWebServer_AuthMiddleware(t *testing.T) {
 	session := server.sessionManager.CreateSession("admin")
 	req = httptest.NewRequest("GET", "/dashboard.html", nil)
 	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
+		Name:  "gateway_session_id",
 		Value: session.ID,
 	})
 	rr = httptest.NewRecorder()

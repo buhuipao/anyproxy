@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnyProxy Client - Login</title>
+    <meta data-i18n-document-title="login.title">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .login-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .logo {
+            margin-bottom: 30px;
+        }
+
+        .logo h1 {
+            color: #333;
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .logo p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #4facfe;
+        }
+
+        .login-btn {
+            width: 100%;
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            margin-top: 10px;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .login-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .error-message {
+            background: #fee;
+            color: #c33;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid #fcc;
+            display: none;
+        }
+
+        .loading {
+            display: none;
+            margin-top: 10px;
+        }
+
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ccc;
+            border-radius: 50%;
+            border-top-color: #4facfe;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .footer {
+            margin-top: 30px;
+            color: #999;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <h1 data-i18n="login.welcome">AnyProxy</h1>
+            <p data-i18n="login.subtitle">Client Management Interface</p>
+        </div>
+
+        <div class="error-message" id="errorMessage"></div>
+
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username" data-i18n="login.username">Username</label>
+                <input type="text" id="username" name="username" data-i18n-placeholder="login.username" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password" data-i18n="login.password">Password</label>
+                <input type="password" id="password" name="password" data-i18n-placeholder="login.password" required>
+            </div>
+
+            <button type="submit" class="login-btn" id="loginBtn" data-i18n="login.button">
+                Login
+            </button>
+            
+            <div class="loading" id="loading"></div>
+        </form>
+
+        <div class="footer" data-i18n="login.footer">
+            © 2025 AnyProxy. Authentication required to access client interface.
+        </div>
+    </div>
+
+    <script src="/js/i18n.js"></script>
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('errorMessage');
+            const loadingDiv = document.getElementById('loading');
+            const loginBtn = document.getElementById('loginBtn');
+            
+            // Hide error message
+            errorDiv.style.display = 'none';
+            
+            // Show loading state
+            loginBtn.disabled = true;
+            loginBtn.textContent = window.i18n.t('login.logging_in');
+            loadingDiv.style.display = 'block';
+            
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    // Login successful, redirect to main interface
+                    window.location.href = '/index.html';
+                } else {
+                    const errorData = await response.text();
+                    showError(errorData || window.i18n.t('login.error.invalid'));
+                }
+            } catch (error) {
+                showError(window.i18n.t('login.error.network'));
+            } finally {
+                // Reset loading state
+                loginBtn.disabled = false;
+                loginBtn.textContent = window.i18n.t('login.button');
+                loadingDiv.style.display = 'none';
+            }
+        });
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        // Check if already authenticated
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/check');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.authenticated) {
+                        window.location.href = '/index.html';
+                    }
+                }
+            } catch (error) {
+                // Ignore error, user is not authenticated
+            }
+        }
+        
+        // Initialize page
+        document.addEventListener('DOMContentLoaded', function() {
+            // Check authentication on page load
+            checkAuth();
+            
+            // Focus on username field
+            document.getElementById('username').focus();
+        });
+    </script>
+</body>
+</html> 

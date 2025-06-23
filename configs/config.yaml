@@ -13,10 +13,10 @@ log:
 proxy:
   socks5:
     listen_addr: ":1080"
-    auth_username: ""
-    auth_password: ""
+    auth_username: "user"
+    auth_password: "password"
   http:
-    listen_addr: ":8088"
+    listen_addr: ":8080"
     auth_username: "user"
     auth_password: "password"
 
@@ -70,3 +70,7 @@ client:
     enabled: true
     listen_addr: ":8091"
     static_dir: "web/client/static"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
+    session_key: "change-this-secret-key"

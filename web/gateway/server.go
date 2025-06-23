@@ -231,7 +231,7 @@ func (gws *WebServer) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Get session from cookie
-		cookie, err := r.Cookie("session_id")
+		cookie, err := r.Cookie("gateway_session_id")
 		if err != nil {
 			gws.requireAuth(w, r)
 			return
@@ -327,7 +327,7 @@ func (gws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Set session cookie
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
+		Name:     "gateway_session_id",
 		Value:    session.ID,
 		Path:     "/",
 		HttpOnly: true,
@@ -355,14 +355,14 @@ func (gws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get session from cookie
-	cookie, err := r.Cookie("session_id")
+	cookie, err := r.Cookie("gateway_session_id")
 	if err == nil {
 		gws.sessionManager.DeleteSession(cookie.Value)
 	}
 
 	// Clear session cookie
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
+		Name:     "gateway_session_id",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
@@ -375,7 +375,7 @@ func (gws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthCheck checks authentication status
 func (gws *WebServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("session_id")
+	cookie, err := r.Cookie("gateway_session_id")
 	if err != nil {
 		response := AuthCheckResponse{Authenticated: false}
 		gws.respondJSON(w, response)

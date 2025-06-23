@@ -48,6 +48,11 @@ func main() {
 		// Create web server
 		webServer = clientWeb.NewClientWebServer(cfg.Client.Web.ListenAddr, cfg.Client.Web.StaticDir, cfg.Client.ClientID, rateLimiter)
 
+		// Configure authentication if enabled
+		if cfg.Client.Web.AuthEnabled {
+			webServer.SetAuth(cfg.Client.Web.AuthEnabled, cfg.Client.Web.AuthUsername, cfg.Client.Web.AuthPassword)
+		}
+
 		// Start web server in a separate goroutine
 		go func() {
 			if err := webServer.Start(); err != nil {
@@ -55,7 +60,7 @@ func main() {
 			}
 		}()
 
-		logger.Info("Client web server started", "listen_addr", cfg.Client.Web.ListenAddr)
+		logger.Info("Client web server started", "listen_addr", cfg.Client.Web.ListenAddr, "auth_enabled", cfg.Client.Web.AuthEnabled)
 	}
 
 	var clients []*client.Client

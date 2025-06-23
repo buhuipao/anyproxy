@@ -55,6 +55,24 @@
         .refresh-status {
             opacity: 0.8;
         }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .user-info span {
+            opacity: 0.9;
+        }
+        .btn-logout {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            font-size: 0.9rem;
+        }
+        .btn-logout:hover {
+            background: rgba(255,255,255,0.3);
+        }
         .stats-grid {
             display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px; margin: 30px 0;
@@ -153,6 +171,10 @@
                         <span class="refresh-status" id="refreshStatus">●</span>
                     </div>
                     <button class="lang-switch" onclick="window.i18n.toggleLanguage()" data-i18n="common.language_switch">中文</button>
+                    <div class="user-info" id="userInfo" style="display: none;">
+                        <span><span data-i18n="client.welcome">Welcome, </span><span id="username"></span></span>
+                        <button class="btn btn-logout" onclick="logout()" data-i18n="client.logout">Logout</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -217,15 +239,62 @@
         let refreshInterval;
 
         // Add translation for auto refresh
+        // Auto refresh translation is already handled by i18n.js
         if (window.i18n && window.i18n.translations) {
             window.i18n.translations.en['common.auto_refresh'] = 'Auto Refresh (10s)';
             window.i18n.translations.zh['common.auto_refresh'] = '自动刷新 (10秒)';
+        }
+
+        // Check authentication status
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/check');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.authenticated) {
+                        document.getElementById('username').textContent = data.username;
+                        document.getElementById('userInfo').style.display = 'flex';
+                        return true;
+                    }
+                }
+                // Not authenticated, redirect to login page
+                window.location.href = '/login.html';
+                return false;
+            } catch (error) {
+                console.error('Auth check failed:', error);
+                // Allow access when auth is disabled
+                return true;
+            }
+        }
+
+        // Logout functionality
+        async function logout() {
+            try {
+                await fetch('/api/auth/logout', { method: 'POST' });
+            } catch (error) {
+                console.error('Logout failed:', error);
+            }
+            window.location.href = '/login.html';
+        }
+
+        // Handle API errors
+        function handleApiError(error, response) {
+            if (response && response.status === 401) {
+                // Authentication failed, redirect to login page
+                window.location.href = '/login.html';
+                return;
+            }
+            console.error('API error:', error);
         }
 
         // Load status information
         async function loadStatus() {
             try {
                 const response = await fetch('/api/status');
+                if (!response.ok) {
+                    handleApiError(null, response);
+                    return;
+                }
                 const data = await response.json();
                 
                 // 🆕 Update client ID from API response and display it properly
@@ -243,7 +312,7 @@
                 document.getElementById('bytes-received').textContent = window.i18n.formatBytes(metricsSource.bytes_received);
                 document.getElementById('uptime').textContent = formatUptime(data.uptime);
             } catch (error) {
-                console.error('Failed to load status:', error);
+                handleApiError(error);
             }
         }
 
@@ -251,6 +320,10 @@
         async function loadConnections() {
             try {
                 const response = await fetch('/api/metrics/connections');
+                if (!response.ok) {
+                    handleApiError(null, response);
+                    return;
+                }
                 const data = await response.json();
                 const tbody = document.getElementById('connections-table');
                 
@@ -275,7 +348,7 @@
                     tbody.appendChild(row);
                 });
             } catch (error) {
-                console.error('Failed to load connections:', error);
+                handleApiError(error);
             }
         }
 
@@ -384,9 +457,13 @@
         }
 
         // Initialize page on load
-        document.addEventListener('DOMContentLoaded', function() {
-            refreshAllData();
-            setupAutoRefresh();
+        document.addEventListener('DOMContentLoaded', async function() {
+            // First check authentication status if auth is enabled
+            const isAuthenticated = await checkAuth();
+            if (isAuthenticated) {
+                refreshAllData();
+                setupAutoRefresh();
+            }
         });
     </script>
 </body>

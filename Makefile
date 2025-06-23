@@ -112,17 +112,44 @@ docker-build: ## Build Docker image
 		-t anyproxy:latest .
 	@echo "Docker image built: anyproxy:$(VERSION)"
 
-docker-run: docker-build ## Run with Docker
+docker-build-cn: ## Build Docker image with China mirrors (faster in China)
+	@echo "Building Docker image with China mirrors..."
+	@docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.cn \
+		-t anyproxy:$(VERSION) \
+		-t anyproxy:latest .
+	@echo "Docker image built with China mirrors: anyproxy:$(VERSION)"
+
+docker-run: docker-run-gateway docker-run-client ## Run with Docker
+
+docker-run-gateway: docker-build ## Run with Docker
 	@echo "Starting services with Docker..."
 	@docker run -d --name anyproxy-gateway \
-		-p 8080:8080 -p 1080:1080 -p 8443:8443 \
-		anyproxy:$(VERSION)
+		-p 8080:8080 -p 1080:1080 -p 8443:8443 -p 8090:8090 \
+		-v $(shell pwd)/configs:/app/configs:ro \
+		-v $(shell pwd)/logs:/app/logs \
+		-v $(shell pwd)/certs:/app/certs:ro \
+		anyproxy:$(VERSION) ./anyproxy-gateway --config configs/config.yaml
 	@echo "Gateway started. Use 'docker logs anyproxy-gateway' to view logs"
+
+docker-run-client: docker-build ## Run with Docker
+	@echo "Starting services with Docker..."
+	@docker run -d --name anyproxy-client \
+		-p 8091:8091 \
+		--network host \
+		-v $(shell pwd)/configs:/app/configs:ro \
+		-v $(shell pwd)/logs:/app/logs \
+		-v $(shell pwd)/certs:/app/certs:ro \
+		anyproxy:$(VERSION) ./anyproxy-client --config configs/config.yaml
+	@echo "Client started. Use 'docker logs anyproxy-client' to view logs"
 
 docker-stop: ## Stop Docker containers
 	@echo "Stopping Docker containers..."
-	@docker stop anyproxy-gateway 2>/dev/null || true
-	@docker rm anyproxy-gateway 2>/dev/null || true
+	@docker stop anyproxy-gateway anyproxy-client 2>/dev/null || true
+	@docker rm anyproxy-gateway anyproxy-client 2>/dev/null || true
 	@echo "Containers stopped"
 
 docker-logs: ## View Docker logs

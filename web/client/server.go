@@ -2,6 +2,8 @@
 package client
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +16,136 @@ import (
 	"github.com/buhuipao/anyproxy/pkg/logger"
 )
 
+// Session represents a user session
+type Session struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+	LastSeen  time.Time `json:"last_seen"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// SessionManager manages user sessions
+type SessionManager struct {
+	mu       sync.RWMutex
+	sessions map[string]*Session
+	timeout  time.Duration
+}
+
+// NewSessionManager creates a new session manager
+func NewSessionManager(timeout time.Duration) *SessionManager {
+	sm := &SessionManager{
+		sessions: make(map[string]*Session),
+		timeout:  timeout,
+	}
+
+	// Start cleanup goroutine
+	go sm.cleanupExpiredSessions()
+
+	return sm
+}
+
+// CreateSession creates a new session for the user
+func (sm *SessionManager) CreateSession(username string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sessionID := sm.generateSessionID()
+	now := time.Now()
+
+	session := &Session{
+		ID:        sessionID,
+		Username:  username,
+		CreatedAt: now,
+		LastSeen:  now,
+		ExpiresAt: now.Add(sm.timeout),
+	}
+
+	sm.sessions[sessionID] = session
+	return session
+}
+
+// GetSession retrieves a session by ID
+func (sm *SessionManager) GetSession(sessionID string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, exists := sm.sessions[sessionID]
+	if !exists || session.ExpiresAt.Before(time.Now()) {
+		return nil
+	}
+
+	return session
+}
+
+// UpdateSession updates the last seen time for a session
+func (sm *SessionManager) UpdateSession(sessionID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if session, exists := sm.sessions[sessionID]; exists {
+		session.LastSeen = time.Now()
+		session.ExpiresAt = time.Now().Add(sm.timeout)
+	}
+}
+
+// DeleteSession deletes a session
+func (sm *SessionManager) DeleteSession(sessionID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	delete(sm.sessions, sessionID)
+}
+
+// cleanupExpiredSessions removes expired sessions
+func (sm *SessionManager) cleanupExpiredSessions() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		sm.mu.Lock()
+		now := time.Now()
+
+		for sessionID, session := range sm.sessions {
+			if session.ExpiresAt.Before(now) {
+				delete(sm.sessions, sessionID)
+			}
+		}
+		sm.mu.Unlock()
+	}
+}
+
+// generateSessionID generates a random session ID
+func (sm *SessionManager) generateSessionID() string {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		logger.Error("Failed to generate session ID", "err", err)
+		return ""
+	}
+	return hex.EncodeToString(bytes)
+}
+
 // API Response Structures (all exclude GroupID for security)
+
+// LoginResponse represents login API response
+type LoginResponse struct {
+	Status    string    `json:"status"`
+	Message   string    `json:"message"`
+	Username  string    `json:"username"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// LogoutResponse represents logout API response
+type LogoutResponse struct {
+	Status string `json:"status"`
+}
+
+// AuthCheckResponse represents authentication check API response
+type AuthCheckResponse struct {
+	Authenticated bool      `json:"authenticated"`
+	Username      string    `json:"username,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+}
 
 // LocalMetricsData represents local metrics data in status response
 type LocalMetricsData struct {
@@ -70,17 +201,31 @@ type WebServer struct {
 	staticDir   string
 	server      *http.Server
 	startTime   time.Time
+
+	// Authentication
+	authEnabled    bool
+	authUsername   string
+	authPassword   string
+	sessionManager *SessionManager
 }
 
 // NewClientWebServer creates a new Client web server
 func NewClientWebServer(addr, staticDir, clientID string, rateLimiter *ratelimit.RateLimiter) *WebServer {
 	return &WebServer{
-		addr:        addr,
-		staticDir:   staticDir,
-		clientID:    clientID,
-		rateLimiter: rateLimiter,
-		startTime:   time.Now(),
+		addr:           addr,
+		staticDir:      staticDir,
+		clientID:       clientID,
+		rateLimiter:    rateLimiter,
+		startTime:      time.Now(),
+		sessionManager: NewSessionManager(24 * time.Hour), // 24 hour sessions
 	}
+}
+
+// SetAuth configures authentication for the web server
+func (cws *WebServer) SetAuth(enabled bool, username, password string) {
+	cws.authEnabled = enabled
+	cws.authUsername = username
+	cws.authPassword = password
 }
 
 // SetActualClientID adds a client ID to the tracked list
@@ -118,20 +263,52 @@ func (cws *WebServer) getClientIDs() []string {
 	return result
 }
 
+// getStaticDir returns the static directory path
+func (cws *WebServer) getStaticDir() string {
+	if cws.staticDir != "" {
+		return cws.staticDir
+	}
+	return "web/client/static/"
+}
+
+// getProtectedHandler returns a handler wrapper based on auth configuration
+func (cws *WebServer) getProtectedHandler() func(http.HandlerFunc) http.HandlerFunc {
+	if cws.authEnabled {
+		return func(handler http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				cws.authMiddleware(handler).ServeHTTP(w, r)
+			}
+		}
+	}
+	return func(handler http.HandlerFunc) http.HandlerFunc {
+		return handler
+	}
+}
+
 // Start starts the web server
 func (cws *WebServer) Start() error {
 	mux := http.NewServeMux()
 
-	// Static files
-	if cws.staticDir != "" {
-		mux.Handle("/", http.FileServer(http.Dir(cws.staticDir)))
+	// Static files (with auth protection if enabled)
+	staticHandler := http.FileServer(http.Dir(cws.getStaticDir()))
+	if cws.authEnabled {
+		mux.Handle("/", cws.authMiddleware(staticHandler))
 	} else {
-		mux.Handle("/", http.FileServer(http.Dir("web/client/static/")))
+		mux.Handle("/", staticHandler)
 	}
 
-	// API routes
-	mux.HandleFunc("/api/status", cws.handleStatus)
-	mux.HandleFunc("/api/metrics/connections", cws.handleConnectionMetrics)
+	// Authentication APIs (always available if auth is enabled)
+	if cws.authEnabled {
+		mux.HandleFunc("/api/auth/login", cws.handleLogin)
+		mux.HandleFunc("/api/auth/logout", cws.handleLogout)
+		mux.HandleFunc("/api/auth/check", cws.handleAuthCheck)
+	}
+
+	// Protected API routes
+	protectedHandler := cws.getProtectedHandler()
+
+	mux.HandleFunc("/api/status", protectedHandler(cws.handleStatus))
+	mux.HandleFunc("/api/metrics/connections", protectedHandler(cws.handleConnectionMetrics))
 
 	// Core APIs only - removed unnecessary config, rate limiting, health and diagnostics APIs
 
@@ -141,7 +318,7 @@ func (cws *WebServer) Start() error {
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 
-	logger.Info("Starting Client Web server", "addr", cws.addr, "client_id", cws.clientID)
+	logger.Info("Starting Client Web server", "addr", cws.addr, "client_id", cws.clientID, "auth_enabled", cws.authEnabled)
 	return cws.server.ListenAndServe()
 }
 
@@ -151,6 +328,182 @@ func (cws *WebServer) Stop() error {
 		return cws.server.Close()
 	}
 	return nil
+}
+
+// authMiddleware checks authentication for protected routes
+func (cws *WebServer) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow access to login page and auth APIs without authentication
+		if cws.isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Get session from cookie
+		cookie, err := r.Cookie("client_session_id")
+		if err != nil {
+			cws.requireAuth(w, r)
+			return
+		}
+
+		// Validate session
+		session := cws.sessionManager.GetSession(cookie.Value)
+		if session == nil {
+			cws.requireAuth(w, r)
+			return
+		}
+
+		// Update session activity
+		cws.sessionManager.UpdateSession(session.ID)
+
+		// Add user info to request context
+		r.Header.Set("X-User", session.Username)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isPublicPath checks if a path should be accessible without authentication
+func (cws *WebServer) isPublicPath(path string) bool {
+	publicPaths := []string{
+		"/login.html",
+		"/js/i18n.js",
+		"/api/auth/login",
+		"/api/auth/logout",
+		"/api/auth/check",
+	}
+
+	for _, publicPath := range publicPaths {
+		if path == publicPath {
+			return true
+		}
+	}
+
+	// Allow access to static assets (js, css, images, etc.) for login page
+	if len(path) > 4 {
+		ext := path[len(path)-4:]
+		if ext == ".css" || ext == ".png" || ext == ".ico" || ext == ".svg" {
+			return true
+		}
+	}
+	if len(path) > 3 {
+		ext := path[len(path)-3:]
+		if ext == ".js" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// requireAuth redirects to login or returns 401 for API calls
+func (cws *WebServer) requireAuth(w http.ResponseWriter, r *http.Request) {
+	// Check if this is an API call
+	if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	// Redirect to login page
+	http.Redirect(w, r, "/login.html", http.StatusFound)
+}
+
+// handleLogin handles user login requests
+func (cws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var loginReq struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate credentials
+	if loginReq.Username != cws.authUsername || loginReq.Password != cws.authPassword {
+		logger.Warn("Failed login attempt", "username", loginReq.Username, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Create session
+	session := cws.sessionManager.CreateSession(loginReq.Username)
+
+	// Set session cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "client_session_id",
+		Value:    session.ID,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false, // Set to true in production with HTTPS
+		SameSite: http.SameSiteStrictMode,
+		Expires:  session.ExpiresAt,
+	})
+
+	logger.Info("User logged in", "username", loginReq.Username, "remote_addr", r.RemoteAddr)
+
+	response := LoginResponse{
+		Status:    "success",
+		Message:   "Login successful",
+		Username:  session.Username,
+		ExpiresAt: session.ExpiresAt,
+	}
+	cws.respondJSON(w, response)
+}
+
+// handleLogout handles user logout requests
+func (cws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get session from cookie
+	cookie, err := r.Cookie("client_session_id")
+	if err == nil {
+		cws.sessionManager.DeleteSession(cookie.Value)
+	}
+
+	// Clear session cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "client_session_id",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Expires:  time.Unix(0, 0),
+	})
+
+	response := LogoutResponse{Status: "success"}
+	cws.respondJSON(w, response)
+}
+
+// handleAuthCheck checks authentication status
+func (cws *WebServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("client_session_id")
+	if err != nil {
+		response := AuthCheckResponse{Authenticated: false}
+		cws.respondJSON(w, response)
+		return
+	}
+
+	session := cws.sessionManager.GetSession(cookie.Value)
+	if session == nil {
+		response := AuthCheckResponse{Authenticated: false}
+		cws.respondJSON(w, response)
+		return
+	}
+
+	response := AuthCheckResponse{
+		Authenticated: true,
+		Username:      session.Username,
+		ExpiresAt:     session.ExpiresAt,
+	}
+	cws.respondJSON(w, response)
 }
 
 // corsMiddleware adds CORS support

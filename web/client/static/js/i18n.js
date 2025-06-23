@@ -21,6 +21,8 @@ class I18n {
                 // Client
                 'client.title': 'AnyProxy Client Dashboard',
                 'client.subtitle': 'Client Management Interface - Local Monitoring',
+                'client.welcome': 'Welcome, ',
+                'client.logout': 'Logout',
                 'client.status.running_status': 'Running Status',
                 'client.status.running': 'Running',
                 'client.status.stopped': 'Stopped',
@@ -69,7 +71,26 @@ class I18n {
                 'client.diagnostics.connections': 'Active Connections',
                 'client.diagnostics.sent': 'Network Sent',
                 'client.diagnostics.received': 'Network Received',
-                'client.diagnostics.errors': 'Error Count'
+                'client.diagnostics.errors': 'Error Count',
+
+                // Login
+                'login.title': 'AnyProxy Client - Login',
+                'login.welcome': 'AnyProxy',
+                'login.subtitle': 'Client Management System',
+                'login.username': 'Username',
+                'login.password': 'Password',
+                'login.button': 'Login',
+                'login.logging_in': 'Logging in...',
+                'login.error.invalid': 'Invalid username or password',
+                'login.error.network': 'Network error, please try again later',
+                'login.footer': '© 2025 AnyProxy. Authentication required to access client interface.',
+
+                // API Errors
+                'api.error.unauthorized': 'Authentication required',
+                'api.error.forbidden': 'Access denied',
+                'api.error.not_found': 'Resource not found',
+                'api.error.server': 'Server error',
+                'api.error.network': 'Network error'
             },
             'zh': {
                 // Common
@@ -89,6 +110,8 @@ class I18n {
                 // Client
                 'client.title': 'AnyProxy 客户端控制台',
                 'client.subtitle': '客户端管理界面 - 本地监控',
+                'client.welcome': '欢迎，',
+                'client.logout': '登出',
                 'client.status.running_status': '运行状态',
                 'client.status.running': '运行中',
                 'client.status.stopped': '已停止',
@@ -137,7 +160,26 @@ class I18n {
                 'client.diagnostics.connections': '活跃连接',
                 'client.diagnostics.sent': '网络发送',
                 'client.diagnostics.received': '网络接收',
-                'client.diagnostics.errors': '错误次数'
+                'client.diagnostics.errors': '错误次数',
+
+                // Login
+                'login.title': 'AnyProxy 客户端 - 登录',
+                'login.welcome': 'AnyProxy',
+                'login.subtitle': '客户端管理系统',
+                'login.username': '用户名',
+                'login.password': '密码',
+                'login.button': '登录',
+                'login.logging_in': '登录中...',
+                'login.error.invalid': '用户名或密码错误',
+                'login.error.network': '网络错误，请稍后重试',
+                'login.footer': '© 2025 AnyProxy. 访问客户端界面需要认证。',
+
+                // API Errors
+                'api.error.unauthorized': '需要认证',
+                'api.error.forbidden': '访问被拒绝',
+                'api.error.not_found': '资源未找到',
+                'api.error.server': '服务器错误',
+                'api.error.network': '网络错误'
             }
         };
 

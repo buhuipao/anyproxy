@@ -202,12 +202,23 @@ EOF
 ```
 
 **Generate Certificates & Start:**
+
+> 💡 **Quick Start Tip**: The Docker image includes a pre-generated test certificate for immediate testing. You can skip certificate generation and use the built-in certificate for initial setup.
+
 ```bash
-# Generate certificate
+# Option 1: Use built-in test certificate (for quick testing)
+docker run -d --name anyproxy-gateway \
+  --restart unless-stopped \
+  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/logs:/app/logs \
+  buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
+
+# Option 2: Generate your own certificate (for production)
 openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
     -days 365 -nodes -subj "/CN=YOUR_PUBLIC_DOMAIN_OR_IP"
 
-# Start gateway
+# Start with custom certificate
 docker run -d --name anyproxy-gateway \
   --restart unless-stopped \
   -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
@@ -222,9 +233,10 @@ docker run -d --name anyproxy-gateway \
 ```bash
 # On your private network machine
 mkdir anyproxy-client && cd anyproxy-client
-mkdir -p configs certs logs
+mkdir -p configs logs
 
-# Copy server certificate from gateway
+# Copy server certificate from gateway (if using custom certificate)
+# For testing with built-in certificate, you can skip this step
 ```
 
 **Client Configuration:**
@@ -241,7 +253,7 @@ transport:
 
 client:
   gateway_addr: "YOUR_PUBLIC_SERVER_IP:8443"  # Replace with your gateway IP
-  gateway_tls_cert: "certs/server.crt"
+  gateway_tls_cert: "certs/server.crt"       # Use built-in cert or your own
   client_id: "home-client-001"
   group_id: "homelab"
   replicas: 1
@@ -275,6 +287,15 @@ EOF
 
 **Start Client:**
 ```bash
+# Option 1: Use built-in test certificate (for quick testing)
+docker run -d --name anyproxy-client \
+  --restart unless-stopped \
+  --network host \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/logs:/app/logs \
+  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
+
+# Option 2: Use custom certificate (for production)
 docker run -d --name anyproxy-client \
   --restart unless-stopped \
   --network host \
@@ -523,6 +544,8 @@ AnyProxy provides comprehensive web-based management interfaces for both Gateway
 
 ## 🐳 Docker Deployment
 
+> 💡 **Ready to Use**: The Docker image includes test certificates and web interface files. You can start testing immediately by only providing configuration files.
+
 ### Gateway (Public Server)
 ```yaml
 # docker-compose.gateway.yml
@@ -540,7 +563,8 @@ services:
       - "8090:8090"     # Web management interface
     volumes:
       - ./configs:/app/configs:ro
-      - ./certs:/app/certs:ro
+      # Optional: Override built-in test certificate with your own
+      # - ./certs:/app/certs:ro
       - ./logs:/app/logs
     restart: unless-stopped
 ```
@@ -558,7 +582,8 @@ services:
       - "8091:8091"     # Web management interface
     volumes:
       - ./configs:/app/configs:ro
-      - ./certs:/app/certs:ro
+      # Optional: Override built-in test certificate with your own
+      # - ./certs:/app/certs:ro
       - ./logs:/app/logs
     restart: unless-stopped
     network_mode: host
@@ -567,13 +592,21 @@ services:
 ## 🔐 Security
 
 ### Certificate Management
+
+> 💡 **Quick Testing**: The Docker image includes a pre-generated test certificate that works for localhost and common test scenarios. You can start testing immediately without generating your own certificates.
+
 ```bash
-# Generate certificate
+# For production - Generate your own certificate
 openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
     -days 365 -nodes -subj "/CN=YOUR_DOMAIN"
 
-# Or use Let's Encrypt
+# Or use Let's Encrypt for production domains
 certbot certonly --standalone -d gateway.yourdomain.com
+
+# For testing - The Docker image includes:
+# - Test certificate valid for localhost, 127.0.0.1, anyproxy
+# - Allows immediate testing without certificate setup
+# - Located at /app/certs/ inside the container
 ```
 
 ### Security Best Practices

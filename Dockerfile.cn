@@ -1,5 +1,8 @@
-# Build stage
-FROM golang:1.23-alpine AS builder
+# Build stage - 使用阿里云镜像加速
+FROM registry.cn-hangzhou.aliyuncs.com/google_containers/golang:1.23-alpine AS builder
+
+# 使用阿里云镜像源
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 # Install build dependencies
 RUN apk add --no-cache git openssl ca-certificates
@@ -7,21 +10,24 @@ RUN apk add --no-cache git openssl ca-certificates
 # Set working directory
 WORKDIR /app
 
+# 设置中国区Go代理和镜像
+ENV GOPROXY=https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,direct
+ENV GOSUMDB=sum.golang.google.cn
+ENV GO111MODULE=on
+ENV CGO_ENABLED=0
+
 # Copy go mod files first for better caching
 COPY go.mod go.sum ./
 
-# Set Go proxy for faster downloads (especially useful in China)
-ENV GOPROXY=https://goproxy.cn,https://goproxy.io,https://proxy.golang.org,direct
-ENV GOSUMDB=sum.golang.google.cn
-ENV GO111MODULE=on
-
-# Download dependencies with retry mechanism
-RUN go mod download && go mod verify
+# Download dependencies with extended timeout
+RUN go clean -modcache && \
+    go mod download -x && \
+    go mod verify
 
 # Copy source code
 COPY . .
 
-# Generate test certificates (for immediate testing - users can override with their own)
+# Generate test certificates
 RUN mkdir -p certs && \
     openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
     -days 365 -nodes -subj "/CN=localhost" \
@@ -42,8 +48,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # Verify binaries
 RUN chmod +x anyproxy-gateway anyproxy-client
 
-# Runtime stage
-FROM alpine:latest
+# Runtime stage - 使用阿里云镜像
+FROM registry.cn-hangzhou.aliyuncs.com/google_containers/alpine:latest
+
+# 使用阿里云镜像源
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 # Install runtime dependencies
 RUN apk --no-cache add ca-certificates tzdata curl
@@ -64,7 +73,7 @@ COPY --from=builder /app/certs ./certs/
 # Copy configuration files
 COPY --from=builder /app/configs ./configs/
 
-# Copy web interface static files only (dashboard, login, monitoring pages)
+# Copy web interface static files only
 COPY --from=builder /app/web/gateway/static ./web/gateway/static/
 COPY --from=builder /app/web/client/static ./web/client/static/
 
@@ -77,14 +86,11 @@ RUN mkdir -p logs && \
 USER anyproxy
 
 # Expose ports
-# HTTP Proxy, SOCKS5 Proxy, TUIC Proxy (UDP), WebSocket Transport, gRPC Transport, QUIC Transport
-# Web management interfaces (Gateway: 8090, Client: 8091)
 EXPOSE 8080 1080 9443/udp 8443 9090 9091 8090 8091
 
 # Health check - works for both gateway and client
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD pgrep -f "anyproxy-" > /dev/null || exit 1
 
-# Default command (can be overridden)
-# Note: Built-in test certificate allows immediate testing without custom certs
+# Default command
 CMD ["./anyproxy-gateway", "--config", "configs/config.yaml"] 
