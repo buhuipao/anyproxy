@@ -1,7 +1,7 @@
 # AnyProxy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)](https://golang.org)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/buhuipao/anyproxy)
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)]()
 [![Release](https://img.shields.io/github/v/release/buhuipao/anyproxy)](https://github.com/buhuipao/anyproxy/releases)
@@ -15,6 +15,7 @@ AnyProxy is a secure tunneling solution that enables you to expose local service
 - [Quick Start](#-quick-start)
 - [Common Use Cases](#-common-use-cases)
 - [Configuration](#️-configuration)
+- [Web Management Interface](#-web-management-interface)
 - [Docker Deployment](#-docker-deployment)
 - [Security](#-security)
 - [Troubleshooting](#-troubleshooting)
@@ -34,6 +35,10 @@ AnyProxy is a secure tunneling solution that enables you to expose local service
 - ⚡ **Port Forwarding**: Direct port mapping for services
 - 🌐 **Cross-Platform**: Linux, macOS, Windows support
 - 🐳 **Container Ready**: Official Docker images available
+- 🖥️ **Web Management Interface**: Real-time monitoring and configuration
+- ⚙️ **Rate Limiting**: Per-client and global traffic control
+- 🌍 **Multi-Language Support**: English and Chinese web interface
+- 📊 **Real-time Monitoring**: Connection metrics and performance analytics
 
 ## 🏗️ Architecture Overview
 
@@ -48,7 +53,8 @@ Internet Users                       Public Gateway Server                   Pri
      │                                 │ • HTTP:8080 │                       │ • SSH Server │
      │                                 │ • SOCKS:1080│                       │ • Web Apps   │
      │                                 │ • TUIC:9443 │                       │ • Databases  │
-     │                                 │             │                       │ • AI Models  │
+     │                                 │ • Web:8090  │                       │ • AI Models  │
+     │                                 │             │                       │ • Web:8091   │
      │                                 │ Transports: │                       │              │
      │                                 │ • WS:8443   │                       │              │
      │                                 │ • gRPC:9090 │                       │              │
@@ -186,6 +192,12 @@ gateway:
   tls_key: "certs/server.key"
   auth_username: "gateway_admin"
   auth_password: "very_secure_gateway_password"
+  web:
+    enabled: true
+    listen_addr: ":8090"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
 EOF
 ```
 
@@ -198,7 +210,7 @@ openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.cr
 # Start gateway
 docker run -d --name anyproxy-gateway \
   --restart unless-stopped \
-  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 \
+  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
   -v $(pwd)/configs:/app/configs:ro \
   -v $(pwd)/certs:/app/certs:ro \
   -v $(pwd)/logs:/app/logs \
@@ -254,6 +266,10 @@ client:
       local_port: 22        # Local SSH port
       local_host: "localhost"
       protocol: "tcp"
+      
+  web:
+    enabled: true
+    listen_addr: ":8091"
 EOF
 ```
 
@@ -452,6 +468,59 @@ client:
     - "localhost:443"       # HTTPS only
 ```
 
+### Rate Limiting Configuration
+
+```yaml
+# Global rate limiting
+rate_limiting:
+  enabled: true
+  global_limit: 1000      # requests per minute
+  per_client_limit: 100   # requests per minute per client
+  bandwidth_limit: 10     # MB/s per client
+```
+
+## 🖥️ Web Management Interface
+
+AnyProxy provides comprehensive web-based management interfaces for both Gateway and Client components.
+
+### Gateway Dashboard
+
+**Access**: `http://YOUR_GATEWAY_IP:8090`
+**Credentials**: admin / admin123
+
+**Features:**
+- 📊 **Real-time Metrics**: Active connections, data transfer, success rates
+- 👥 **Client Management**: View all connected clients and their status
+- 🌍 **Multi-language**: English/Chinese interface with one-click switching
+- 🔄 **Auto-refresh**: Configurable real-time data updates
+- 🔐 **Secure Authentication**: Session-based login system
+- 📈 **Traffic Analytics**: Detailed connection and performance metrics
+
+### Client Dashboard
+
+**Access**: `http://YOUR_CLIENT_IP:8091`
+**No authentication required**
+
+**Features:**
+- 🔍 **Connection Monitoring**: View all active proxy connections
+- 📊 **Performance Metrics**: Data transfer and uptime statistics
+- 🏥 **Health Status**: Gateway connectivity and local service checks
+- ⚙️ **Configuration View**: Current client settings and port forwards
+
+### API Endpoints
+
+**Gateway API:**
+- `GET /api/metrics/global` - Global system metrics
+- `GET /api/metrics/clients` - All client statistics  
+- `GET /api/metrics/connections` - Active connections
+- `POST /api/auth/login` - Authentication
+- `GET /api/ratelimit/config` - Rate limiting settings
+
+**Client API:**
+- `GET /api/status` - Client runtime status
+- `GET /api/metrics/local` - Local performance metrics
+- `GET /api/metrics/connections` - Client connections
+
 ## 🐳 Docker Deployment
 
 ### Gateway (Public Server)
@@ -462,12 +531,13 @@ services:
   anyproxy-gateway:
     image: buhuipao/anyproxy:latest
     container_name: anyproxy-gateway
-            command: ./anyproxy-gateway --config configs/gateway.yaml
+    command: ./anyproxy-gateway --config configs/gateway.yaml
     ports:
       - "8080:8080"     # HTTP proxy
       - "1080:1080"     # SOCKS5 proxy
       - "9443:9443/udp" # TUIC proxy (UDP)
       - "8443:8443"     # WebSocket (or 9090 for gRPC, 9091 for QUIC)
+      - "8090:8090"     # Web management interface
     volumes:
       - ./configs:/app/configs:ro
       - ./certs:/app/certs:ro
@@ -483,7 +553,9 @@ services:
   anyproxy-client:
     image: buhuipao/anyproxy:latest
     container_name: anyproxy-client
-            command: ./anyproxy-client --config configs/client.yaml
+    command: ./anyproxy-client --config configs/client.yaml
+    ports:
+      - "8091:8091"     # Web management interface
     volumes:
       - ./configs:/app/configs:ro
       - ./certs:/app/certs:ro
@@ -504,6 +576,14 @@ openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.cr
 certbot certonly --standalone -d gateway.yourdomain.com
 ```
 
+### Security Best Practices
+- ✅ Use strong passwords for all authentication
+- ✅ Restrict allowed hosts to specific services only
+- ✅ Enable TLS for all transport protocols
+- ✅ Regularly rotate certificates
+- ✅ Monitor connection logs for suspicious activity
+- ✅ Use firewall rules to restrict access to management ports
+
 ## 📊 Troubleshooting
 
 ### Basic Health Checks
@@ -513,6 +593,10 @@ curl -x http://user:pass@gateway:8080 https://httpbin.org/ip
 
 # Check TUIC proxy port (UDP)
 nc -u -v gateway 9443
+
+# Check web interfaces
+curl http://gateway:8090/api/metrics/global
+curl http://client:8091/api/status
 
 # Check logs
 docker logs anyproxy-gateway
@@ -527,6 +611,7 @@ curl -x http://user:pass@gateway:8080 http://localhost:22
 - **Authentication failed**: Verify usernames and passwords in configs
 - **Certificate errors**: Ensure certificate matches domain/IP
 - **Transport mismatch**: Ensure Gateway and Client use the same transport type
+- **Web interface 404**: Verify web.enabled is true and ports are accessible
 
 ## 🔗 Integration
 
@@ -552,6 +637,24 @@ curl -x http://user:pass@gateway:8080 http://localhost:3000
 curl --socks5 user:pass@gateway:1080 http://localhost:22
 ```
 
+### Clash Configuration
+```yaml
+proxies:
+  - name: "AnyProxy-HTTP"
+    type: http
+    server: YOUR_GATEWAY_IP
+    port: 8080
+    username: proxy_user
+    password: secure_proxy_password
+
+  - name: "AnyProxy-SOCKS5"
+    type: socks5
+    server: YOUR_GATEWAY_IP
+    port: 1080
+    username: socks_user
+    password: secure_socks_password
+```
+
 ## 📚 Quick Reference
 
 **Default Ports:**
@@ -559,6 +662,7 @@ curl --socks5 user:pass@gateway:1080 http://localhost:22
 - SOCKS5 Proxy: `1080`
 - TUIC Proxy: `9443` (UDP)
 - WebSocket: `8443`, gRPC: `9090`, QUIC: `9091`
+- Gateway Web: `8090`, Client Web: `8091`
 
 **Key Commands:**
 ```bash
@@ -570,6 +674,10 @@ curl --socks5 user:pass@gateway:1080 http://localhost:22
 
 # Test connection
 curl -x http://user:pass@gateway:8080 https://httpbin.org/ip
+
+# Access web interface
+open http://gateway:8090  # Gateway dashboard
+open http://client:8091   # Client monitoring
 ```
 
 ## 🤝 Contributing

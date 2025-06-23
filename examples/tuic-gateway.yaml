@@ -1,75 +1,73 @@
 # AnyProxy Gateway Configuration Example with TUIC Support
 # This configuration file demonstrates how to set up a gateway with TUIC proxy support
 
+log:
+  level: "info"
+  format: "json"
+  output: "file"
+  file: "logs/gateway.log"
+
+# Transport layer configuration  
+transport:
+  type: "websocket"  # websocket, grpc, or quic
+
 # Gateway server configuration
 gateway:
-  listen_addr: ":8080"                    # WebSocket gateway for clients
+  listen_addr: ":8443"                    # WebSocket gateway for clients (use :9090 for gRPC, :9091 for QUIC)
+  tls_cert: "certs/server.crt"            # TLS certificate (required for production)
+  tls_key: "certs/server.key"             # TLS private key
+  auth_username: "gateway_admin"          # Gateway authentication
+  auth_password: "secure_gateway_password"
   
-  # Transport layer for client connections
-  transport:
-    type: "websocket"  # or "quic", "grpc"
-  
-  # TLS configuration (optional)
-  tls:
-    enabled: false
-    cert_file: "certs/server.crt" 
-    key_file: "certs/server.key"
-    
-  # Authentication for client connections
-  auth:
+  # Web management interface
+  web:
     enabled: true
-    users:
-      - username: "client1"
-        password: "pass1"
-        group: "group1"
+    listen_addr: ":8090"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
 
 # Proxy configurations
 proxy:
-  # TUIC proxy configuration (NEW!)
+  # TUIC proxy configuration (Ultra-low latency UDP proxy)
   tuic:
-    enabled: true
     listen_addr: ":9443"                        # Standard TUIC port (UDP)
     token: "your-secure-tuic-token-here"        # Replace with your secure token
     uuid: "12345678-1234-5678-9abc-123456789abc" # Replace with your UUID
-    
-    # TLS configuration for TUIC (recommended for production)
-    cert_file: "certs/tuic-server.crt"          # TLS certificate file
-    key_file: "certs/tuic-server.key"           # TLS private key file
+    cert_file: "certs/server.crt"               # TLS certificate file (required)
+    key_file: "certs/server.key"                # TLS private key file
 
   # Optional: Traditional HTTP proxy
   http:
-    enabled: true
-    listen_addr: ":8081"
+    listen_addr: ":8080"
+    auth_username: "http_user"
+    auth_password: "http_password"
     
   # Optional: Traditional SOCKS5 proxy  
   socks5:
-    enabled: true
-    listen_addr: ":8082"
+    listen_addr: ":1080"
+    auth_username: "socks_user"
+    auth_password: "socks_password"
 
-# Logging configuration
-logging:
-  level: "info"        # debug, info, warn, error
-  format: "json"       # json, text
-  output: "file"       # console, file
-  file: "logs/gateway.log"
+# TUIC Usage Examples:
+# - Gaming: Ultra-low latency for real-time games
+# - Mobile: Connection migration when switching networks  
+# - IoT: Efficient for frequent short connections
+# - Streaming: Smooth video with 0-RTT handshake
 
-# Monitoring configuration
-monitoring:
-  enabled: true
-  metrics_addr: ":8090"
+# Docker Usage:
+# docker run -d --name anyproxy-tuic \
+#   -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
+#   -v $(pwd)/configs:/app/configs:ro \
+#   -v $(pwd)/certs:/app/certs:ro \
+#   -v $(pwd)/logs:/app/logs \
+#   buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/tuic-gateway.yaml
 
-# TUIC-only configuration example
-# Uncomment below to run TUIC proxy only:
-#
-# proxy:
-#   tuic:
-#     enabled: true
-#     listen_addr: ":9443"
-#     token: "secure-token-replace-in-production"
-#     uuid: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-#     cert_file: "/path/to/cert.pem"
-#     key_file: "/path/to/key.pem"
-#   http:
-#     enabled: false
-#   socks5:
-#     enabled: false 
+# Client configuration example (place on private network):
+# client:
+#   gateway_addr: "YOUR_PUBLIC_IP:8443"
+#   gateway_tls_cert: "certs/server.crt"
+#   client_id: "tuic-client"
+#   group_id: "production"
+#   auth_username: "gateway_admin"
+#   auth_password: "secure_gateway_password" 

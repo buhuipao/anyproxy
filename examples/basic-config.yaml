@@ -16,6 +16,12 @@ gateway:
   tls_key: "certs/server.key"
   auth_username: "gateway_admin"
   auth_password: "secure_password_2024"
+  web:
+    enabled: true
+    listen_addr: ":8090"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
 
 # Proxy services
 proxy:
@@ -46,7 +52,13 @@ client:
   allowed_hosts:
     - "192.168.1.0/24:*"      # Local network
     - "*.local:*"             # Local services
+    
+  # Web interface
+  web:
+    enabled: true
+    listen_addr: ":8091"
 
 # Usage examples:
 # HTTP: curl -x http://http_user:http_password@YOUR_GATEWAY_IP:8080 https://httpbin.org/ip
-# SOCKS5: curl --socks5 socks_user:socks_password@YOUR_GATEWAY_IP:1080 https://httpbin.org/ip 
+# SOCKS5: curl --socks5 socks_user:socks_password@YOUR_GATEWAY_IP:1080 https://httpbin.org/ip
+# Web Interface: http://YOUR_GATEWAY_IP:8090 (admin/admin123) 

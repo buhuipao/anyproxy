@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git openssl ca-certificates
@@ -54,6 +54,7 @@ WORKDIR /app
 COPY --from=builder /app/anyproxy-gateway /app/anyproxy-client ./
 COPY --from=builder /app/certs ./certs/
 COPY --from=builder /app/configs ./configs/
+COPY --from=builder /app/web ./web/
 
 # Create necessary directories
 RUN mkdir -p logs && \
@@ -63,7 +64,9 @@ RUN mkdir -p logs && \
 USER anyproxy
 
 # Expose ports
-EXPOSE 8080 1080 8443 9090 9091
+# HTTP Proxy, SOCKS5 Proxy, TUIC Proxy (UDP), WebSocket Transport, gRPC Transport, QUIC Transport
+# Web management interfaces (Gateway: 8090, Client: 8091)
+EXPOSE 8080 1080 9443/udp 8443 9090 9091 8090 8091
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

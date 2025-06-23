@@ -28,9 +28,13 @@ print_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
+# Function to compare versions
+version_gte() {
+    [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
 # Test environment setup
 print_step "Setting up test environment"
-export GO_VERSION="1.21"
 export PROJECT_NAME="anyproxy"
 
 # Check Go version
@@ -38,7 +42,13 @@ print_step "Checking Go version"
 if command -v go &> /dev/null; then
     GO_CURRENT_VERSION=$(go version | grep -o 'go[0-9]\+\.[0-9]\+' | sed 's/go//')
     echo "Current Go version: $GO_CURRENT_VERSION"
-    print_success "Go is installed"
+    # Check if Go version is >= 1.23
+    if version_gte "$GO_CURRENT_VERSION" "1.23"; then
+        print_success "Go version $GO_CURRENT_VERSION is compatible (>= 1.23)"
+    else
+        print_error "Go version $GO_CURRENT_VERSION is too old (required >= 1.23)"
+        exit 1
+    fi
 else
     print_error "Go is not installed"
     exit 1
