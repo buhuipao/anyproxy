@@ -261,7 +261,14 @@ func (c *ClientConn) routeMessage(msg map[string]interface{}) {
 		return
 	}
 
-	// Send message to connection's channel (non-blocking with context awareness)
+	// Send message to connection's channel with minimal panic protection
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Debug("Recovered from send on closed channel, cleaning up connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+			go c.closeConnection(connID)
+		}
+	}()
+
 	select {
 	case msgChan <- msg:
 		// Successfully routed, don't log high-frequency data messages
@@ -270,13 +277,10 @@ func (c *ClientConn) routeMessage(msg map[string]interface{}) {
 		}
 	case <-c.ctx.Done():
 		logger.Debug("Message routing cancelled due to context", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
-		return
 	default:
-		// Fix: Close connection when channel is full, instead of silently dropping messages
-		logger.Error("Message channel full for connection, closing connection to prevent protocol inconsistency", "client_id", c.ID, "conn_id", connID, "message_type", msgType, "channel_size", len(msgChan), "channel_cap", cap(msgChan))
-		// Clean up connection asynchronously to avoid deadlock
+		// Channel is full - close connection to prevent protocol inconsistency
+		logger.Debug("Message channel full, cleaning up connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
 		go c.closeConnection(connID)
-		return
 	}
 }
 

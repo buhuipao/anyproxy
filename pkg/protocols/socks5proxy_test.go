@@ -7,7 +7,6 @@ import (
 	"time"
 
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
-	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 )
 
@@ -185,9 +184,7 @@ func TestSOCKS5Proxy_DialFunction(t *testing.T) {
 		}
 
 		// Check if user context was added
-		type userContextKey string
-		const userKey userContextKey = "user"
-		userCtx, ok := ctx.Value(userKey).(*utils.UserContext)
+		userCtx, ok := commonctx.GetUserContext(ctx)
 		if !ok || userCtx == nil {
 			t.Error("Expected user context in dial function")
 		}

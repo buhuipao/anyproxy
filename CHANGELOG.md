@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advanced load balancing algorithms
 - Plugin system for custom protocols
 
-## [v1.0.0] - 2025-01-15
+## [v1.0.0] - 2025-06-15
 
 ### 🚀 Initial Production Release - AnyProxy
 
@@ -48,28 +48,28 @@ A secure tunneling solution with modern architecture, multiple transport protoco
 
 **Gateway Dashboard**
 - Real-time metrics monitoring (connections, bandwidth, success rates)
-- Client management with status tracking and traffic analytics
-- Rate limiting configuration and monitoring
-- Multi-language support (English/Chinese) with persistent preferences
-- Secure authentication with session management
-- Auto-refresh capabilities with configurable intervals
-- RESTful API for integration with external monitoring systems
+- Client management with online/offline status detection and traffic analytics
+- Session-based authentication with 24-hour automatic renewal
+- Complete bilingual support (English/Chinese) with persistent localStorage preferences
+- Auto-refresh capabilities with 10-second configurable intervals
+- RESTful JSON API with CORS support for integration
+- Memory-based metrics with automatic cleanup and inconsistency detection
 
 **Client Dashboard**
 - Local connection monitoring and performance metrics
-- Health check integration for gateway and local services
-- Configuration management for host access and port forwarding
-- System diagnostics and runtime information
-- Connection analytics with detailed traffic breakdown
+- Multi-client instance support with runtime information tracking
+- Optional authentication with configurable session management
+- Real-time connection analytics with detailed traffic breakdown
+- Client status monitoring with uptime and connection summaries
 
 #### ⚡ Advanced Features
 
-**Rate Limiting System**
-- Per-client bandwidth and request rate limiting
-- Global traffic control with burst handling
-- Configurable time windows and limit types
-- Real-time monitoring and adjustment via web interface
-- Memory-based storage for lightweight operation
+**Intelligent Metrics System**
+- Memory-based real-time metrics collection with atomic operations
+- Automatic client offline detection (2-minute inactivity timeout)
+- Periodic cleanup process with 10-second intervals for responsive updates
+- Connection count validation and automatic inconsistency correction
+- Stale connection cleanup for offline clients
 
 **Security Enhancements**
 - Transport-level TLS encryption for all protocols
@@ -79,11 +79,11 @@ A secure tunneling solution with modern architecture, multiple transport protoco
 - Comprehensive audit logging with structured output
 
 **Monitoring & Analytics**
-- Real-time connection tracking and metrics collection
-- Performance analytics with historical data retention
-- Error rate monitoring and alerting capabilities
-- Connection lifecycle management and cleanup
-- Memory-efficient metrics storage with automatic cleanup
+- Real-time connection tracking with individual lifecycle management
+- Thread-safe metrics collection using atomic operations
+- Client online/offline status with automatic state management
+- Connection validation with automatic count correction
+- Memory-efficient storage with intelligent cleanup (3-minute offline retention)
 
 #### ⚙️ Configuration
 

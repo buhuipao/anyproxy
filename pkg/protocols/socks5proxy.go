@@ -97,9 +97,7 @@ func NewSOCKS5ProxyWithAuth(cfg *config.SOCKS5Config, dialFn func(context.Contex
 		}
 
 		// Add user context to context
-		type userContextKey string
-		const userKey userContextKey = "user"
-		ctx = context.WithValue(ctx, userKey, userCtx)
+		ctx = commonctx.WithUserContext(ctx, userCtx)
 
 		logger.Debug("Calling dial function for SOCKS5 request", "conn_id", connID, "network", network, "address", addr, "username", userCtx.Username, "group_id", userCtx.GroupID)
 

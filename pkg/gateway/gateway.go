@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
 	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
@@ -76,7 +77,7 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	dialFn := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// Extract user information from context
 		var groupID string
-		if userCtx, ok := ctx.Value("user").(*utils.UserContext); ok {
+		if userCtx, ok := commonctx.GetUserContext(ctx); ok {
 			logger.Debug("Dial function received user context", "group_id", userCtx.GroupID, "network", network, "address", addr)
 			groupID = userCtx.GroupID
 		} else {

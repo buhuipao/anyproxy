@@ -31,8 +31,8 @@ func (m *mockMessageConnection) Close() error {
 func TestClientMessageHandler_PortForward(t *testing.T) {
 	// create port forward response message
 	successMsg := protocol.PackPortForwardResponseMessage(true, "", []protocol.PortForwardStatus{
-		{Port: 8080, Success: true},
-		{Port: 8081, Success: false},
+		{Port: 18080, Success: true},
+		{Port: 18081, Success: false},
 	})
 
 	mockConn := &mockMessageConnection{
@@ -59,11 +59,11 @@ func TestClientMessageHandler_PortForward(t *testing.T) {
 
 	// 验证端口状态
 	if ports, ok := msg["ports"].(map[int]bool); ok {
-		if !ports[8080] {
-			t.Error("Expected port 8080 to be successful")
+		if !ports[18080] {
+			t.Error("Expected port 18080 to be successful")
 		}
-		if ports[8081] {
-			t.Error("Expected port 8081 to be unsuccessful")
+		if ports[18081] {
+			t.Error("Expected port 18081 to be unsuccessful")
 		}
 	} else {
 		t.Error("Failed to get ports from message")
@@ -74,8 +74,8 @@ func TestClientMessageHandler_PortForward(t *testing.T) {
 func TestGatewayMessageHandler_PortForward(t *testing.T) {
 	// 创建端口转发请求消息
 	ports := []protocol.PortConfig{
-		{RemotePort: 8080, LocalPort: 80, LocalHost: "localhost", Protocol: "tcp"},
-		{RemotePort: 8081, LocalPort: 81, LocalHost: "localhost", Protocol: "udp"},
+		{RemotePort: 18080, LocalPort: 80, LocalHost: "localhost", Protocol: "tcp"},
+		{RemotePort: 18081, LocalPort: 81, LocalHost: "localhost", Protocol: "udp"},
 	}
 	reqMsg := protocol.PackPortForwardMessage("client-123", ports)
 
@@ -109,8 +109,8 @@ func TestGatewayMessageHandler_PortForward(t *testing.T) {
 
 		// 验证第一个端口
 		if port0, ok := openPorts[0].(map[string]interface{}); ok {
-			if remotePort, ok := port0["remote_port"].(int); !ok || remotePort != 8080 {
-				t.Errorf("Expected remote_port 8080, got %v", port0["remote_port"])
+			if remotePort, ok := port0["remote_port"].(int); !ok || remotePort != 18080 {
+				t.Errorf("Expected remote_port 18080, got %v", port0["remote_port"])
 			}
 			if protocol, ok := port0["protocol"].(string); !ok || protocol != "tcp" {
 				t.Errorf("Expected protocol 'tcp', got %v", port0["protocol"])

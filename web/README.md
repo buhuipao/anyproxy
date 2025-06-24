@@ -1,174 +1,287 @@
 # AnyProxy Web Management Interfaces
 
-AnyProxy 提供了完整的 Web 管理界面，支持实时监控、配置管理和多维度统计分析。
+AnyProxy provides comprehensive web management interfaces with real-time monitoring, session-based authentication, and automatic metrics collection with intelligent cleanup.
 
-## 🌟 功能特性
+## 🌟 Features
 
-### Gateway Web 界面
-- **实时监控**: 活跃连接、数据传输统计、成功率监控
-- **客户端管理**: 查看所有连接的客户端状态和流量统计
-- **多维度统计**: 按客户端、域名、连接等维度分析数据
-- **速率限制**: 配置和监控客户端访问限制
-- **认证安全**: 基于用户名密码的访问控制
-- **国际化支持**: 中英文双语界面
+### Gateway Web Interface
+- **Real-time Monitoring**: Active connections, data transfer statistics, success rate monitoring
+- **Client Management**: View all connected client status and traffic statistics with online/offline detection
+- **Automatic Metrics Collection**: Memory-based metrics with 2-minute offline detection and 3-minute cleanup
+- **Session-based Authentication**: 24-hour sessions with automatic renewal and secure cookie management
+- **Internationalization Support**: Complete bilingual interface (English/Chinese) with persistent preferences
+- **Responsive Design**: Mobile-friendly interface with modern UI components
 
-### Client Web 界面
-- **本地监控**: 客户端运行状态和连接情况
-- **健康检查**: 网关连接和本地服务状态检测
-- **连接管理**: 查看活跃连接详情和流量统计
-- **系统诊断**: 运行时间、错误统计、网络使用情况
-- **配置管理**: 端口转发和主机访问规则配置
+### Client Web Interface
+- **Local Monitoring**: Client runtime status and connection information
+- **Connection Tracking**: Real-time view of active connections and traffic statistics
+- **Multi-client Support**: Track multiple client instances from single interface
+- **Optional Authentication**: Configurable authentication with session management
+- **Auto-refresh**: Configurable real-time data updates with manual control
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 1. 启动服务
+### 1. Start Services
 
-使用提供的测试脚本快速启动：
+Use the provided test script to start quickly:
 
 ```bash
-# 启动 Gateway 和 Client 服务（包含 Web 界面）
+# Start Gateway and Client services (including Web interfaces)
 ./scripts/test-web-interface.sh
 ```
 
-### 2. 访问 Web 界面
+### 2. Access Web Interfaces
 
-**Gateway 管理界面**
+**Gateway Management Interface**
 - URL: http://localhost:8090
-- 用户名: `admin`
-- 密码: `admin123`
+- Username: `admin`
+- Password: `admin123`
+- Features: Dashboard, login page, real-time metrics
 
-**Client 监控界面**
+**Client Monitoring Interface**
 - URL: http://localhost:8091
-- 无需认证
+- No authentication required (by default)
+- Features: Status monitoring, connection tracking
 
-## 📱 界面功能
+### 3. Validate Setup
 
-### Gateway 仪表盘
-- **统计卡片**: 显示活跃连接、总连接数、数据传输量、成功率
-- **客户端状态表**: 实时显示所有客户端的连接状态和流量
-- **自动刷新**: 支持10秒自动刷新，可手动开关
-- **语言切换**: 点击右上角按钮切换中英文
+Run the validation script to test all documented features:
 
-### Client 监控面板
-- **运行状态**: 显示客户端运行时间和基本统计
-- **连接列表**: 详细显示所有活跃连接的信息
-- **健康检查**: 网关连接状态和本地服务可达性
-- **系统信息**: 客户端版本、运行时间、网络统计
+```bash
+# Test web interface functionality and API endpoints
+./scripts/test-web-interface.sh
+```
 
-## ⚙️ 配置选项
+This script will:
+- ✅ Check web service availability on both ports
+- ✅ Test all documented API endpoints
+- ✅ Validate authentication functionality
+- ✅ Verify static file access and i18n support
+- ✅ Provide troubleshooting guidance if issues are found
 
-### Gateway Web 配置
+## 📱 Interface Components
+
+### Gateway Dashboard (`dashboard.html`)
+- **Statistics Cards**: Real-time display of active connections, total connections, data transfer, success rate
+- **Client Status Table**: Live monitoring of all client connection status and traffic with online/offline indicators
+- **Auto Refresh**: Configurable 10-second auto refresh with manual toggle
+- **Language Switch**: One-click switching between English and Chinese with persistent storage
+
+### Client Monitoring (`index.html`)
+- **Runtime Status**: Display client uptime and basic connection statistics
+- **Connection List**: Detailed view of all active connections with traffic breakdown
+- **Multi-client Tracking**: Support for monitoring multiple client instances
+- **System Information**: Client ID, runtime, and connection metrics
+
+### Authentication (`login.html`)
+- **Secure Login**: Session-based authentication with 24-hour timeout
+- **Internationalized**: Bilingual login interface with error handling
+- **Security Features**: HttpOnly cookies, CSRF protection, session management
+
+## ⚙️ Configuration Options
+
+### Gateway Web Configuration
 
 ```yaml
 gateway:
   web:
-    enabled: true                    # 启用 Web 界面
-    listen_addr: ":8090"            # 监听地址
-    static_dir: "web/gateway/static" # 静态文件目录
-    auth_enabled: true              # 启用认证
-    auth_username: "admin"          # 用户名
-    auth_password: "admin123"       # 密码
+    enabled: true                    # Enable Web interface
+    listen_addr: ":8090"            # Listen address
+    static_dir: "web/gateway/static" # Static files directory
+    auth_enabled: true              # Enable authentication
+    auth_username: "admin"          # Username
+    auth_password: "admin123"       # Password
 ```
 
-### Client Web 配置
+### Client Web Configuration
 
 ```yaml
 client:
   web:
-    enabled: true                   # 启用 Web 界面
-    listen_addr: ":8091"           # 监听地址
-    static_dir: "web/client/static" # 静态文件目录
+    enabled: true                   # Enable Web interface
+    listen_addr: ":8091"           # Listen address
+    static_dir: "web/client/static" # Static files directory
+    auth_enabled: false             # Optional authentication
+    auth_username: "client"         # Username (if auth enabled)
+    auth_password: "password"       # Password (if auth enabled)
 ```
 
-## 🔧 API 接口
+## 🔧 API Interfaces
 
 ### Gateway API
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/api/auth/login` | POST | 用户登录 |
-| `/api/auth/logout` | POST | 用户登出 |
-| `/api/auth/check` | GET | 检查认证状态 |
-| `/api/metrics/global` | GET | 全局统计数据 |
-| `/api/metrics/clients` | GET | 客户端统计数据 |
-| `/api/metrics/domains` | GET | 域名统计数据 |
-| `/api/metrics/connections` | GET | 连接统计数据 |
-| `/api/ratelimit/config` | GET/POST | 速率限制配置 |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/auth/login` | POST | User login (creates 24-hour session) |
+| `/api/auth/logout` | POST | User logout (destroys session) |
+| `/api/auth/check` | GET | Check authentication status |
+| `/api/metrics/global` | GET | Global statistics (active connections, data transfer, success rate) |
+| `/api/metrics/clients` | GET | All client statistics with online/offline status |
+| `/api/metrics/connections` | GET | Active connection details and metrics |
 
 ### Client API
 
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/api/status` | GET | 客户端状态 |
-| `/api/metrics/local` | GET | 本地统计数据 |
-| `/api/metrics/connections` | GET | 连接统计数据 |
-| `/api/health` | GET | 健康检查 |
-| `/api/diagnostics` | GET | 系统诊断信息 |
-| `/api/config/hosts` | GET/PUT | 主机访问配置 |
-| `/api/config/ports` | GET/POST | 端口转发配置 |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/auth/login` | POST | User login (if authentication enabled) |
+| `/api/auth/logout` | POST | User logout (if authentication enabled) |
+| `/api/auth/check` | GET | Check authentication status |
+| `/api/status` | GET | Client status with runtime metrics and connection summary |
+| `/api/metrics/connections` | GET | Connection metrics for all tracked client instances |
 
-## 🌍 国际化支持
+## 🌍 Internationalization Support
 
-支持中英文双语界面：
-- **English**: 默认语言
-- **中文**: 完整本地化支持
-- **切换方式**: 点击界面右上角的语言切换按钮
-- **持久化**: 语言选择会保存在浏览器本地存储中
+Complete bilingual support implemented via `i18n.js`:
 
-## 📊 统计数据
+- **Languages**: English (default) and Chinese
+- **Persistent Selection**: Language preference saved in browser localStorage
+- **Complete Coverage**: All UI elements, error messages, and formatting
+- **Switch Method**: Click the language toggle button in the interface header
+- **Localized Formatting**: Numbers, dates, file sizes, and durations
+- **Real-time Updates**: Dynamic language switching without page reload
 
-- **内存存储**: 所有统计数据仅存储在内存中，不持久化到磁盘
-- **实时性**: 统计数据实时更新，重启后重新开始计算  
-- **轻量级**: 无需外部数据库依赖，减少资源占用
+### I18n Features
+- Automatic browser language detection
+- Fallback to English for missing translations
+- Parameter substitution support
+- Consistent terminology across interfaces
+- Cultural adaptation for date/time formatting
 
-## 🔒 安全特性
+## 📊 Monitoring System
 
-- **Gateway 认证**: 支持用户名密码认证，保护管理界面
-- **会话管理**: 24小时会话超时，支持自动续期
-- **CORS 支持**: 允许跨域访问API接口
-- **错误处理**: 完善的错误处理和用户友好的错误提示
+### Memory-based Metrics
+- **Real-time Collection**: All metrics stored in memory with atomic operations
+- **Connection Tracking**: Individual connection lifecycle management
+- **Client Status**: Online/offline detection with automatic cleanup
+- **Data Transfer**: Byte-level tracking for sent/received data
+- **Error Tracking**: Connection failure and error rate monitoring
 
-## 📱 响应式设计
+### Automatic Cleanup Process
+- **Offline Detection**: Clients marked offline after 2 minutes of inactivity
+- **Cleanup Interval**: Runs every 10 seconds for responsive updates
+- **Stale Connection Removal**: Automatic cleanup of connections from offline clients
+- **Metrics Validation**: Periodic validation and auto-correction of connection counts
+- **Memory Management**: Efficient cleanup to prevent memory leaks
 
-- **移动友好**: 支持手机和平板设备访问
-- **自适应布局**: 根据屏幕大小自动调整界面
-- **现代UI**: 采用现代化的设计语言和交互体验
+### Performance Optimizations
+- **Atomic Operations**: Thread-safe counters for concurrent access
+- **Connection Pooling**: Efficient connection state management
+- **Batch Updates**: Optimized metric updates for high-throughput scenarios
+- **Consistency Checks**: Automatic detection and correction of inconsistent states
 
-## 🚨 故障排除
+## 🔒 Security Features
 
-### 常见问题
+### Authentication System
+- **Session Management**: 24-hour sessions with automatic renewal
+- **Secure Cookies**: HttpOnly, Secure, SameSite protection
+- **Session Cleanup**: Automatic removal of expired sessions every 5 minutes
+- **Failed Login Tracking**: Audit logging of failed authentication attempts
 
-1. **无法访问Web界面**
-   - 检查端口是否被占用
-   - 确认服务是否正常启动
-   - 检查防火墙设置
+### Authorization
+- **Protected Routes**: API endpoints protected by authentication middleware
+- **Public Assets**: Static files (CSS, JS, images) accessible for login page
+- **CORS Support**: Configurable cross-origin resource sharing
+- **Request Validation**: Input sanitization and validation
 
-2. **Gateway登录失败**
-   - 检查用户名密码是否正确
-   - 查看服务日志确认错误信息
+### Data Protection
+- **No Group ID Exposure**: Sensitive client grouping information excluded from API responses
+- **Minimal Data Exposure**: Only necessary metrics exposed via API
+- **Secure Error Handling**: Prevent information leakage through error messages
 
-3. **数据显示为空**
-   - 确认Gateway和Client已建立连接
-   - 检查是否有实际的代理流量
+## 📱 Responsive Design
 
-4. **自动刷新不工作**
-   - 检查浏览器控制台是否有错误
-   - 确认API接口是否正常响应
+### Mobile Compatibility
+- **Adaptive Layout**: Automatic adjustment for different screen sizes
+- **Touch-friendly**: Optimized for touch interactions
+- **Readable Typography**: Responsive font sizes and spacing
+- **Efficient Navigation**: Mobile-optimized menu and button layouts
 
-### 日志位置
+### Modern UI Components
+- **Clean Design**: Modern card-based layout with consistent spacing
+- **Status Indicators**: Visual connection status with color coding
+- **Data Visualization**: Clear presentation of metrics and statistics
+- **Interactive Elements**: Hover effects and smooth animations
 
-- Gateway日志: `logs/anyproxy.log`
-- Client日志: `logs/anyproxy.log`
-- Web访问日志: 控制台输出
+## 🚨 Troubleshooting
 
-## 🔄 开发模式
+### Common Issues
 
-如需修改Web界面：
+1. **Cannot access Web interface**
+   - Check if ports are accessible: `curl http://localhost:8090` (Gateway) or `curl http://localhost:8091` (Client)
+   - Verify service startup: Check logs for "Starting Gateway/Client Web server" message
+   - Confirm configuration: Ensure `web.enabled: true` in config file
 
-1. 修改HTML/CSS/JS文件
-2. 重启对应的服务
-3. 刷新浏览器页面
+2. **Authentication issues**
+   - Gateway login fails: Verify username/password in config match login credentials
+   - Session expires: Check if session timeout (24 hours) has been exceeded
+   - Cookie issues: Clear browser cookies and try again
 
-静态文件路径：
-- Gateway: `web/gateway/static/`
-- Client: `web/client/static/` 
+3. **Missing or incorrect data**
+   - Empty metrics: Ensure Gateway and Client are connected and processing traffic
+   - Client shows offline: Check if client hasn't been active for >2 minutes
+   - Inconsistent connection counts: Metrics system automatically detects and corrects these
+
+4. **Language switching problems**
+   - Language not persisting: Check if browser localStorage is enabled
+   - Incomplete translation: Verify `i18n.js` is loaded correctly
+   - Browser compatibility: Ensure modern browser with JavaScript enabled
+
+### Debug Information
+
+**Log Locations**
+- Gateway logs: `logs/anyproxy.log`
+- Client logs: `logs/anyproxy.log`
+- Web server logs: Console output during startup
+
+**Browser Console**
+- Check for JavaScript errors that might affect functionality
+- Monitor API requests for authentication or network issues
+- Verify WebSocket connections for real-time updates
+
+## 🔄 Development and Customization
+
+### Static File Structure
+```
+web/
+├── gateway/static/
+│   ├── dashboard.html       # Main dashboard interface
+│   ├── login.html          # Authentication page
+│   ├── index.html          # Landing page
+│   └── js/i18n.js          # Internationalization
+└── client/static/
+    ├── index.html          # Client monitoring interface
+    ├── login.html          # Authentication page (if enabled)
+    └── js/i18n.js          # Internationalization
+```
+
+### Adding Custom Translations
+1. Edit `web/gateway/static/js/i18n.js` or `web/client/static/js/i18n.js`
+2. Add new translation keys to both `en` and `zh` objects
+3. Use `data-i18n="your.key"` in HTML elements
+4. Restart the web server to load changes
+
+### API Integration
+- RESTful JSON APIs with CORS support
+- Consistent error handling with HTTP status codes
+- Real-time data updates with configurable refresh intervals
+- Secure authentication tokens for API access
+
+## 🎯 Best Practices
+
+### Security
+- Always enable authentication in production environments
+- Use HTTPS with valid certificates for production deployments
+- Regularly rotate authentication credentials
+- Monitor logs for suspicious login attempts
+
+### Performance
+- Configure appropriate cleanup intervals based on client count
+- Monitor memory usage with many connected clients
+- Use auto-refresh judiciously to avoid overwhelming the server
+- Implement rate limiting for API endpoints in high-traffic scenarios
+
+### Maintenance
+- Regularly check logs for errors or warnings
+- Monitor client connection patterns and cleanup efficiency
+- Update translation files when adding new features
+- Test authentication and session management periodically 

@@ -1,0 +1,39 @@
+---
+
+log:
+  level: "debug"
+  format: "text"
+  output: "stdout"
+  file: "logs/anyproxy.log"
+  max_size: 100           
+  max_backups: 5          
+  max_age: 30             
+  compress: true          
+
+proxy:
+  socks5:
+    listen_addr: ":1080"
+    auth_username: "user"
+    auth_password: "password"
+  http:
+    listen_addr: ":8080"
+    auth_username: "user"
+    auth_password: "password"
+
+transport:
+  type: "grpc"
+
+gateway:
+  listen_addr: ":8443"
+  tls_cert: "certs/server.crt"
+  tls_key: "certs/server.key"
+  auth_username: "gateway_user"
+  auth_password: "gateway_password"
+  web:
+    enabled: true
+    listen_addr: ":8090"
+    static_dir: "web/gateway/static"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
+    session_key: "change-this-secret-key-123"

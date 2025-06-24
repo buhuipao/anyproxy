@@ -146,9 +146,7 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Set user context to request
 	if userCtx != nil {
-		type userContextKey string
-		const userKey userContextKey = "user"
-		ctx := context.WithValue(r.Context(), userKey, userCtx)
+		ctx := commonctx.WithUserContext(r.Context(), userCtx)
 		r = r.WithContext(ctx)
 	}
 

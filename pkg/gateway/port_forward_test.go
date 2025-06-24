@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,8 +63,8 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 			name: "open TCP port successfully",
 			ports: []config.OpenPort{
 				{
-					RemotePort: 18080,
-					LocalPort:  8080,
+					RemotePort: 18100,
+					LocalPort:  8100,
 					LocalHost:  "localhost",
 					Protocol:   "tcp",
 				},
@@ -74,8 +75,8 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 			name: "open UDP port successfully",
 			ports: []config.OpenPort{
 				{
-					RemotePort: 18081,
-					LocalPort:  8081,
+					RemotePort: 18101,
+					LocalPort:  8101,
 					LocalHost:  "localhost",
 					Protocol:   "udp",
 				},
@@ -86,8 +87,8 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 			name: "port already in use by another client",
 			ports: []config.OpenPort{
 				{
-					RemotePort: 18082,
-					LocalPort:  8082,
+					RemotePort: 18102,
+					LocalPort:  8102,
 					LocalHost:  "localhost",
 					Protocol:   "tcp",
 				},
@@ -98,8 +99,8 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 			name: "invalid protocol",
 			ports: []config.OpenPort{
 				{
-					RemotePort: 18083,
-					LocalPort:  8083,
+					RemotePort: 18103,
+					LocalPort:  8103,
 					LocalHost:  "localhost",
 					Protocol:   "invalid",
 				},
@@ -114,7 +115,7 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 	}
 
 	// Pre-register port for conflict test
-	mgr.portOwners[PortKey{Port: 18082, Protocol: "tcp"}] = "another-client"
+	mgr.portOwners[PortKey{Port: 18102, Protocol: "tcp"}] = "another-client"
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,13 +124,12 @@ func TestPortForwardManager_OpenPorts(t *testing.T) {
 			}
 
 			err := mgr.OpenPorts(client.ClientConn, tt.ports)
+
+			// Always clean up opened ports, regardless of test result
+			defer mgr.CloseClientPorts(client.ID)
+
 			if (err != nil) != tt.wantErr {
 				t.Errorf("OpenPorts() error = %v, wantErr %v", err, tt.wantErr)
-			}
-
-			// Clean up opened ports
-			if err == nil {
-				mgr.CloseClientPorts(client.ID)
 			}
 		})
 	}
@@ -152,8 +152,8 @@ func TestPortForwardManager_CloseClientPorts(t *testing.T) {
 	// Open a port first
 	ports := []config.OpenPort{
 		{
-			RemotePort: 18090,
-			LocalPort:  8090,
+			RemotePort: 18110,
+			LocalPort:  8110,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
@@ -165,7 +165,7 @@ func TestPortForwardManager_CloseClientPorts(t *testing.T) {
 	}
 
 	// Verify port is open
-	portKey := PortKey{Port: 18090, Protocol: "tcp"}
+	portKey := PortKey{Port: 18110, Protocol: "tcp"}
 	if _, exists := mgr.portOwners[portKey]; !exists {
 		t.Error("Port should be registered")
 	}
@@ -210,8 +210,8 @@ func TestPortForwardManager_Stop(t *testing.T) {
 	// Open ports for multiple clients
 	ports1 := []config.OpenPort{
 		{
-			RemotePort: 18091,
-			LocalPort:  8091,
+			RemotePort: 18111,
+			LocalPort:  8111,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
@@ -219,8 +219,8 @@ func TestPortForwardManager_Stop(t *testing.T) {
 
 	ports2 := []config.OpenPort{
 		{
-			RemotePort: 18092,
-			LocalPort:  8092,
+			RemotePort: 18112,
+			LocalPort:  8112,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
@@ -266,14 +266,14 @@ func TestPortForwardManager_GetClientPorts(t *testing.T) {
 	// Open some ports
 	openPorts := []config.OpenPort{
 		{
-			RemotePort: 18093,
-			LocalPort:  8093,
+			RemotePort: 18113,
+			LocalPort:  8113,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
 		{
-			RemotePort: 18094,
-			LocalPort:  8094,
+			RemotePort: 18114,
+			LocalPort:  8114,
 			LocalHost:  "localhost",
 			Protocol:   "udp",
 		},
@@ -300,10 +300,16 @@ func TestPortForwardManager_ConcurrentOperations(t *testing.T) {
 	defer cancel()
 
 	// Test concurrent port operations
-	done := make(chan bool, 3)
+	var wg sync.WaitGroup
+
+	// Use channels for proper synchronization
+	portsOpened := make(chan bool, 1)
+	portsQueried := make(chan bool, 1)
 
 	// Goroutine 1: Open ports
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		client := &mockPortForwardClient{
 			ClientConn: &ClientConn{
 				ID:      "client1",
@@ -315,40 +321,47 @@ func TestPortForwardManager_ConcurrentOperations(t *testing.T) {
 
 		ports := []config.OpenPort{
 			{
-				RemotePort: 18097,
-				LocalPort:  8097,
+				RemotePort: 18117,
+				LocalPort:  8117,
 				LocalHost:  "localhost",
 				Protocol:   "tcp",
 			},
 		}
 
 		mgr.OpenPorts(client.ClientConn, ports)
-		done <- true
+		portsOpened <- true
 	}()
 
-	// Goroutine 2: Get client ports
+	// Goroutine 2: Get client ports (wait for ports to be opened first)
+	wg.Add(1)
 	go func() {
-		time.Sleep(50 * time.Millisecond) // Give time for ports to open
+		defer wg.Done()
+		<-portsOpened // Wait for ports to be opened
 		ports := mgr.GetClientPorts("client1")
 		_ = ports // Just access it
-		done <- true
+		portsQueried <- true
 	}()
 
-	// Goroutine 3: Close ports
+	// Goroutine 3: Close ports (wait for query to complete)
+	wg.Add(1)
 	go func() {
-		time.Sleep(100 * time.Millisecond) // Give time for operations
+		defer wg.Done()
+		<-portsQueried // Wait for query to complete
 		mgr.CloseClientPorts("client1")
-		done <- true
 	}()
 
-	// Wait for all operations to complete
-	for i := 0; i < 3; i++ {
-		select {
-		case <-done:
-			// Success
-		case <-time.After(2 * time.Second):
-			t.Fatal("Concurrent operation timeout")
-		}
+	// Wait for all operations to complete with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(5 * time.Second):
+		t.Fatal("Concurrent operation timeout")
 	}
 }
 
@@ -371,14 +384,14 @@ func TestPortForwardManager_SamePortDifferentProtocols(t *testing.T) {
 	// Open both TCP and UDP on the same port number
 	ports := []config.OpenPort{
 		{
-			RemotePort: 19000,
-			LocalPort:  9000,
+			RemotePort: 19100,
+			LocalPort:  9100,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
 		{
-			RemotePort: 19000,
-			LocalPort:  9001,
+			RemotePort: 19100,
+			LocalPort:  9101,
 			LocalHost:  "localhost",
 			Protocol:   "udp",
 		},
@@ -390,8 +403,8 @@ func TestPortForwardManager_SamePortDifferentProtocols(t *testing.T) {
 	}
 
 	// Verify both ports are registered
-	tcpKey := PortKey{Port: 19000, Protocol: "tcp"}
-	udpKey := PortKey{Port: 19000, Protocol: "udp"}
+	tcpKey := PortKey{Port: 19100, Protocol: "tcp"}
+	udpKey := PortKey{Port: 19100, Protocol: "udp"}
 
 	if _, exists := mgr.portOwners[tcpKey]; !exists {
 		t.Error("TCP port should be registered")
@@ -419,8 +432,8 @@ func TestPortForwardManager_SamePortDifferentProtocols(t *testing.T) {
 
 	conflictPorts := []config.OpenPort{
 		{
-			RemotePort: 19000,
-			LocalPort:  9002,
+			RemotePort: 19100,
+			LocalPort:  9102,
 			LocalHost:  "localhost",
 			Protocol:   "tcp", // Should conflict with existing TCP port
 		},
@@ -470,11 +483,11 @@ func TestPortForwardManager_ProtocolSpecificOperations(t *testing.T) {
 		},
 	}
 
-	// Client1 opens TCP on port 19001
+	// Client1 opens TCP on port 19101
 	ports1 := []config.OpenPort{
 		{
-			RemotePort: 19001,
-			LocalPort:  9003,
+			RemotePort: 19101,
+			LocalPort:  9103,
 			LocalHost:  "localhost",
 			Protocol:   "tcp",
 		},
@@ -488,8 +501,8 @@ func TestPortForwardManager_ProtocolSpecificOperations(t *testing.T) {
 	// Client2 should be able to open UDP on the same port number
 	ports2 := []config.OpenPort{
 		{
-			RemotePort: 19001,
-			LocalPort:  9004,
+			RemotePort: 19101,
+			LocalPort:  9104,
 			LocalHost:  "localhost",
 			Protocol:   "udp",
 		},
@@ -501,8 +514,8 @@ func TestPortForwardManager_ProtocolSpecificOperations(t *testing.T) {
 	}
 
 	// Verify port ownership
-	tcpKey := PortKey{Port: 19001, Protocol: "tcp"}
-	udpKey := PortKey{Port: 19001, Protocol: "udp"}
+	tcpKey := PortKey{Port: 19101, Protocol: "tcp"}
+	udpKey := PortKey{Port: 19101, Protocol: "udp"}
 
 	if owner := mgr.portOwners[tcpKey]; owner != client1.ID {
 		t.Errorf("TCP port should be owned by client1, got %s", owner)

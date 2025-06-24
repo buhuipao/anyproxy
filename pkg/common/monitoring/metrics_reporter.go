@@ -3,6 +3,7 @@ package monitoring
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -13,6 +14,7 @@ type MetricsReporter struct {
 	interval time.Duration
 	ctx      context.Context
 	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 // NewMetricsReporter creates metrics reporter
@@ -30,16 +32,19 @@ func NewMetricsReporter(interval time.Duration) *MetricsReporter {
 
 // Start starts periodic reporting
 func (r *MetricsReporter) Start() {
+	r.wg.Add(1)
 	go r.run()
 }
 
-// Stop stops reporting
+// Stop stops reporting and waits for the goroutine to finish
 func (r *MetricsReporter) Stop() {
 	r.cancel()
+	r.wg.Wait()
 }
 
 // run runs reporting loop
 func (r *MetricsReporter) run() {
+	defer r.wg.Done()
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 

@@ -219,7 +219,51 @@ func TestGRPCTransport_Close(t *testing.T) {
 }
 
 func TestGRPCTransport_Authentication(t *testing.T) {
-	// Skip authentication tests as they require complex stream setup
-	// Authentication is tested indirectly through the server implementation
-	t.Skip("Skipping direct authentication test - requires complex mock setup")
+	// Test authentication configuration is properly stored and used
+	authConfig := &transport.AuthConfig{
+		Username: "testuser",
+		Password: "testpass",
+	}
+
+	trans := NewGRPCTransportWithAuth(authConfig)
+	grpcTrans := trans.(*grpcTransport)
+
+	if grpcTrans.authConfig == nil {
+		t.Fatal("Auth config should not be nil")
+	}
+
+	if grpcTrans.authConfig.Username != authConfig.Username {
+		t.Errorf("Expected username %s, got %s", authConfig.Username, grpcTrans.authConfig.Username)
+	}
+
+	if grpcTrans.authConfig.Password != authConfig.Password {
+		t.Errorf("Expected password %s, got %s", authConfig.Password, grpcTrans.authConfig.Password)
+	}
+
+	// Test that the transport can handle authentication in config
+	config := &transport.ClientConfig{
+		ClientID:   "test-client",
+		GroupID:    "test-group",
+		Username:   "override-user", // This should be used over authConfig
+		Password:   "override-pass", // This should be used over authConfig
+		SkipVerify: true,
+	}
+
+	// Test dial with invalid address to ensure auth config is processed
+	_, err := trans.DialWithConfig("invalid-address:99999", config)
+	if err == nil {
+		t.Error("Expected error when dialing invalid address")
+	}
+
+	// The important verification is that auth config is stored and would be used
+	// in actual connections. Since we can't easily test gRPC auth without a full
+	// server setup, we verify the configuration is properly managed.
+
+	// Test creating transport without auth
+	transNoAuth := NewGRPCTransport()
+	grpcTransNoAuth := transNoAuth.(*grpcTransport)
+
+	if grpcTransNoAuth.authConfig != nil {
+		t.Error("Auth config should be nil for transport without auth")
+	}
 }

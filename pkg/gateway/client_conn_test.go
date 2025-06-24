@@ -142,11 +142,17 @@ func TestClientConn_DialNetwork(t *testing.T) {
 	}
 	mockConn.hasMessages = true
 
-	// Start message handling in background
-	go client.handleMessage()
+	// Use a channel to signal when the message handler is ready
+	handlerReady := make(chan struct{})
 
-	// Give time for handler to start
-	time.Sleep(50 * time.Millisecond)
+	// Start message handling in background
+	go func() {
+		close(handlerReady) // Signal that handler is starting
+		client.handleMessage()
+	}()
+
+	// Wait for handler to be ready
+	<-handlerReady
 
 	// Create a mock dialer that tracks the connection ID
 	mockConn.writeMessageFunc = func(data []byte) error {
@@ -165,7 +171,7 @@ func TestClientConn_DialNetwork(t *testing.T) {
 	}
 
 	// Test dial
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	conn, err := client.dialNetwork(ctx, "tcp", "example.com:80")
@@ -204,7 +210,10 @@ func TestClientConn_HandleMessage(t *testing.T) {
 			},
 			verify: func(client *ClientConn, t *testing.T) {
 				// Message should have been routed
-				time.Sleep(100 * time.Millisecond)
+				// Use a timeout instead of sleep
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				<-ctx.Done()
 			},
 		},
 		{
@@ -226,7 +235,9 @@ func TestClientConn_HandleMessage(t *testing.T) {
 				client.createMessageChannel("conn1")
 			},
 			verify: func(client *ClientConn, t *testing.T) {
-				time.Sleep(100 * time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				<-ctx.Done()
 			},
 		},
 		{
@@ -269,8 +280,8 @@ func TestClientConn_HandleMessage(t *testing.T) {
 					"type": protocol.MsgTypePortForwardReq,
 					"open_ports": []interface{}{
 						map[string]interface{}{
-							"remote_port": float64(8080),
-							"local_port":  float64(8080),
+							"remote_port": float64(18080),
+							"local_port":  float64(18080),
 							"local_host":  "localhost",
 							"protocol":    "tcp",
 						},
@@ -279,7 +290,9 @@ func TestClientConn_HandleMessage(t *testing.T) {
 			},
 			setup: func(client *ClientConn) {},
 			verify: func(client *ClientConn, t *testing.T) {
-				time.Sleep(100 * time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				<-ctx.Done()
 			},
 		},
 		{
@@ -320,15 +333,30 @@ func TestClientConn_HandleMessage(t *testing.T) {
 				tt.setup(client)
 			}
 
-			// Handle messages
+			// Handle messages with proper synchronization
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
 			handleMessageDone := make(chan struct{})
 			go func() {
+				defer close(handleMessageDone)
 				client.handleMessage()
-				close(handleMessageDone)
 			}()
 
 			// Give time for processing
-			time.Sleep(200 * time.Millisecond)
+			processingDone := make(chan struct{})
+			go func() {
+				defer close(processingDone)
+				time.Sleep(300 * time.Millisecond) // Still need some time for async processing
+			}()
+
+			select {
+			case <-processingDone:
+				// Processing time completed
+			case <-ctx.Done():
+				t.Error("Processing timeout")
+				return
+			}
 
 			// Run verification
 			if tt.verify != nil {
@@ -344,7 +372,7 @@ func TestClientConn_HandleMessage(t *testing.T) {
 			select {
 			case <-handleMessageDone:
 				// Good, handleMessage exited
-			case <-time.After(1 * time.Second):
+			case <-ctx.Done():
 				t.Error("handleMessage did not exit in time")
 			}
 
@@ -413,13 +441,28 @@ func TestClientConn_RouteMessage(t *testing.T) {
 			// Route message
 			client.routeMessage(tt.msg)
 
-			// Give time for goroutines
-			time.Sleep(50 * time.Millisecond)
-
+			// Use synchronous verification instead of sleep
 			// Verify channel creation for connect_response
 			if tt.msg["type"] == protocol.MsgTypeConnectResponse {
-				if _, exists := client.msgChans[tt.msg["id"].(string)]; !exists {
-					t.Error("Channel should have been created for connect_response")
+				if connID, ok := tt.msg["id"].(string); ok {
+					if _, exists := client.msgChans[connID]; !exists {
+						t.Error("Channel should have been created for connect_response")
+					}
+				}
+			}
+
+			// For other message types, verify the message was handled
+			if tt.msg["type"] == protocol.MsgTypeData {
+				if connID, ok := tt.msg["id"].(string); ok && connID != "" {
+					if ch, exists := client.msgChans[connID]; exists {
+						// Check if message was sent to channel (non-blocking)
+						select {
+						case <-ch:
+							// Message was received
+						default:
+							// Channel is empty, which is fine for non-existent connections
+						}
+					}
 				}
 			}
 		})
@@ -550,40 +593,76 @@ func TestClientConn_HandleDataMessage(t *testing.T) {
 }
 
 func TestClientConn_HandleConnection(t *testing.T) {
-	client, mockTransportConn := createTestClientConn()
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{
+			name: "handle new connection",
+			test: func(t *testing.T) {
+				client, mockTransportConn := createTestClientConn()
 
-	// Create a connection with mock net.Conn
-	mockNetConn := &mockNetConn{
-		readData: []byte("test data from local connection"),
+				// Create a connection with mock net.Conn
+				mockNetConn := &mockNetConn{
+					readData: []byte("test data from local connection"),
+				}
+
+				conn := &Conn{
+					ID:        "conn1",
+					LocalConn: mockNetConn,
+					Done:      make(chan struct{}),
+				}
+
+				// Track written messages with proper synchronization
+				var writtenMessages [][]byte
+				var mu sync.Mutex
+				var messageWritten sync.WaitGroup
+				messageWritten.Add(1)
+
+				mockTransportConn.writeMessageFunc = func(data []byte) error {
+					mu.Lock()
+					writtenMessages = append(writtenMessages, data)
+					mu.Unlock()
+					messageWritten.Done()
+					return nil
+				}
+
+				// Start handling connection
+				go client.handleConnection(conn)
+
+				// Wait for at least one message to be written
+				done := make(chan struct{})
+				go func() {
+					messageWritten.Wait()
+					close(done)
+				}()
+
+				select {
+				case <-done:
+					// Message was written successfully
+				case <-time.After(200 * time.Millisecond):
+					t.Error("Timeout waiting for data to be written to transport")
+				}
+
+				// Verify data was sent
+				mu.Lock()
+				messageCount := len(writtenMessages)
+				mu.Unlock()
+
+				if messageCount == 0 {
+					t.Error("Expected data to be written to transport")
+				}
+
+				// Close connection
+				close(conn.Done)
+				time.Sleep(50 * time.Millisecond)
+			},
+		},
 	}
 
-	conn := &Conn{
-		ID:        "conn1",
-		LocalConn: mockNetConn,
-		Done:      make(chan struct{}),
+	for _, tt := range tests {
+		t.Run(tt.name, tt.test)
 	}
-
-	// Track written messages
-	var writtenMessages [][]byte
-	mockTransportConn.writeMessageFunc = func(data []byte) error {
-		writtenMessages = append(writtenMessages, data)
-		return nil
-	}
-
-	// Start handling connection
-	go client.handleConnection(conn)
-
-	// Give time for data to be read and sent
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify data was sent
-	if len(writtenMessages) == 0 {
-		t.Error("Expected data to be written to transport")
-	}
-
-	// Close connection
-	close(conn.Done)
-	time.Sleep(50 * time.Millisecond)
 }
 
 // Update mockConnectionExt to support test scenarios

@@ -1,0 +1,43 @@
+---
+
+log:
+  level: "debug"
+  format: "text"
+  output: "stdout"
+  file: "logs/anyproxy.log"
+  max_size: 100           
+  max_backups: 5          
+  max_age: 30             
+  compress: true          
+
+transport:
+  type: "grpc"
+
+client:
+  gateway_addr: "47.107.181.88:8443"  # demo gateway address
+  gateway_tls_cert: "certs/server.crt"
+  client_id: "client-demo"
+  # demo group id, change it to your own group id
+  # !!! Careful: if you don't set, it means your client will be a default group client
+  group_id: "changed-to-your-group-id"
+  replicas: 3
+  auth_username: "gateway_user"
+  auth_password: "gateway_password"
+  forbidden_hosts:
+    - "0.0.0.0"
+    - "127.0.0.1"
+  allowed_hosts:
+    - ".*"
+  open_ports:
+    # - remote_port: 8000
+    #   protocol: "tcp"
+    #   local_port: 3000
+    #   local_host: "127.0.0.1"
+  web:
+    enabled: true
+    listen_addr: ":8091"
+    static_dir: "web/client/static"
+    auth_enabled: true
+    auth_username: "admin"
+    auth_password: "admin123"
+    session_key: "change-this-secret-key"

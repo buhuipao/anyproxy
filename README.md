@@ -8,8 +8,27 @@
 
 AnyProxy is a secure tunneling solution that enables you to expose local services to the internet through multiple transport protocols. Built with a modular architecture supporting WebSocket, gRPC, and QUIC transports with end-to-end TLS encryption.
 
+## 🚀 Try Demo
+
+**Want to test AnyProxy in 30 seconds?** Try our demo client:
+
+```bash
+cd demo && docker run -d \
+  --name anyproxy-demo-client \
+  --network host \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/certs:/app/certs:ro \
+  buhuipao/anyproxy:latest \
+  ./anyproxy-client --config configs/client.yaml
+```
+
+🌐 **Web Interface**: http://localhost:8091 (admin / admin123)
+
+📖 **Complete Demo Guide**: See [demo/README.md](demo/README.md) for detailed instructions.
+
 ## 📑 Table of Contents
 
+- [Try Demo](#-try-demo)
 - [Key Features](#-key-features)
 - [Architecture Overview](#️-architecture-overview)
 - [Quick Start](#-quick-start)
@@ -109,6 +128,12 @@ Usage Examples:
 • curl -x http://user.prod:pass@gateway:8080 https://prod-api.com
 • curl -x http://user.staging:pass@gateway:8080 https://staging-api.com  
 • curl -x http://user.dev:pass@gateway:8080 http://localhost:3000
+
+⚠️ **Critical Group Routing Rules**:
+• **With group_id**: Use `username.group_id` format in proxy authentication
+• **Without group_id**: Use `username` only - routes to default group
+• **Wrong group_id**: Invalid group_id also routes to default group
+• **Missing group_id**: Client without group_id joins default group
 ```
 
 ### Port Forward Architecture
@@ -203,27 +228,28 @@ EOF
 
 **Generate Certificates & Start:**
 
-> 💡 **Quick Start Tip**: The Docker image includes a pre-generated test certificate for immediate testing. You can skip certificate generation and use the built-in certificate for initial setup.
+> ⚠️ **Certificate Important Note**: The Docker image includes a pre-generated test certificate that **ONLY works for localhost testing**. For remote gateway deployment, you **MUST** generate certificates with the correct IP address or domain name using the provided script.
 
 ```bash
-# Option 1: Use built-in test certificate (for quick testing)
-docker run -d --name anyproxy-gateway \
-  --restart unless-stopped \
-  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
-  -v $(pwd)/configs:/app/configs:ro \
-  -v $(pwd)/logs:/app/logs \
-  buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
+# For Remote Gateway: Generate certificate with your public IP/domain (REQUIRED)
+./scripts/generate_certs.sh YOUR_PUBLIC_IP
+# or for domain:
+./scripts/generate_certs.sh gateway.yourdomain.com
 
-# Option 2: Generate your own certificate (for production)
-openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
-    -days 365 -nodes -subj "/CN=YOUR_PUBLIC_DOMAIN_OR_IP"
-
-# Start with custom certificate
+# Start gateway with generated certificate
 docker run -d --name anyproxy-gateway \
   --restart unless-stopped \
   -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
   -v $(pwd)/configs:/app/configs:ro \
   -v $(pwd)/certs:/app/certs:ro \
+  -v $(pwd)/logs:/app/logs \
+  buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
+
+# For Local Testing ONLY: Use built-in test certificate (localhost only)
+docker run -d --name anyproxy-gateway \
+  --restart unless-stopped \
+  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
+  -v $(pwd)/configs:/app/configs:ro \
   -v $(pwd)/logs:/app/logs \
   buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
 ```
@@ -233,10 +259,11 @@ docker run -d --name anyproxy-gateway \
 ```bash
 # On your private network machine
 mkdir anyproxy-client && cd anyproxy-client
-mkdir -p configs logs
+mkdir -p configs certs logs
 
-# Copy server certificate from gateway (if using custom certificate)
-# For testing with built-in certificate, you can skip this step
+# Copy server certificate from gateway server (REQUIRED for remote gateway)
+# For remote gateway: scp user@gateway-server:/path/to/anyproxy-gateway/certs/server.crt ./certs/
+# For localhost testing: You can use the built-in certificate (skip copy)
 ```
 
 **Client Configuration:**
@@ -287,15 +314,7 @@ EOF
 
 **Start Client:**
 ```bash
-# Option 1: Use built-in test certificate (for quick testing)
-docker run -d --name anyproxy-client \
-  --restart unless-stopped \
-  --network host \
-  -v $(pwd)/configs:/app/configs:ro \
-  -v $(pwd)/logs:/app/logs \
-  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
-
-# Option 2: Use custom certificate (for production)
+# For Remote Gateway: Use certificates from gateway server (REQUIRED)
 docker run -d --name anyproxy-client \
   --restart unless-stopped \
   --network host \
@@ -303,18 +322,32 @@ docker run -d --name anyproxy-client \
   -v $(pwd)/certs:/app/certs:ro \
   -v $(pwd)/logs:/app/logs \
   buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
+
+# For Local Testing ONLY: Use built-in test certificate (localhost only)
+docker run -d --name anyproxy-client \
+  --restart unless-stopped \
+  --network host \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/logs:/app/logs \
+  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
 ```
 
 ### Step 3: Test Connection
 
+⚠️ **Group-Based Routing Important**: If you set a `group_id` in your client config, you **MUST** use the format `username.group_id` in proxy authentication. Otherwise, traffic will route to the default group.
+
 ```bash
-# Test HTTP proxy
-curl -x http://proxy_user:secure_proxy_password@YOUR_PUBLIC_SERVER_IP:8080 \
+# Test HTTP proxy (with group_id - REQUIRED format)
+curl -x http://proxy_user.homelab:secure_proxy_password@YOUR_PUBLIC_SERVER_IP:8080 \
   http://localhost:80
 
-# Test SOCKS5 proxy
-curl --socks5 socks_user:secure_socks_password@YOUR_PUBLIC_SERVER_IP:1080 \
+# Test SOCKS5 proxy (with group_id - REQUIRED format)
+curl --socks5 socks_user.homelab:secure_socks_password@YOUR_PUBLIC_SERVER_IP:1080 \
   http://localhost:22
+
+# Without group_id (goes to default group)
+curl -x http://proxy_user:secure_proxy_password@YOUR_PUBLIC_SERVER_IP:8080 \
+  http://localhost:80
 
 # Test TUIC proxy (requires TUIC-compatible client)
 # Use TUIC client with: tuic://your-tuic-token@YOUR_PUBLIC_SERVER_IP:9443?uuid=12345678-1234-5678-9abc-123456789abc
@@ -349,8 +382,8 @@ client:
     - "169.254.0.0/16"
 EOF
 
-# Connect via SSH
-ssh -o "ProxyCommand=nc -X 5 -x socks_user:secure_socks_password@YOUR_GATEWAY_IP:1080 %h %p" user@localhost
+# Connect via SSH (with group_id)
+ssh -o "ProxyCommand=nc -X 5 -x socks_user.ssh:secure_socks_password@YOUR_GATEWAY_IP:1080 %h %p" user@localhost
 ```
 
 ### 2. Web Development
@@ -370,8 +403,8 @@ client:
     - "localhost:*"
     - "127.0.0.1:*"
 
-# Access local dev servers
-curl -x http://proxy_user:secure_proxy_password@YOUR_GATEWAY_IP:8080 http://localhost:3000
+# Access local dev servers (replace 'dev' with your group_id)
+curl -x http://proxy_user.dev:secure_proxy_password@YOUR_GATEWAY_IP:8080 http://localhost:3000
 ```
 
 ### 3. Database Access
@@ -502,7 +535,7 @@ rate_limiting:
 
 ## 🖥️ Web Management Interface
 
-AnyProxy provides comprehensive web-based management interfaces for both Gateway and Client components.
+AnyProxy provides comprehensive web-based management interfaces with session-based authentication, real-time monitoring, and intelligent metrics collection.
 
 ### Gateway Dashboard
 
@@ -510,37 +543,40 @@ AnyProxy provides comprehensive web-based management interfaces for both Gateway
 **Credentials**: admin / admin123
 
 **Features:**
-- 📊 **Real-time Metrics**: Active connections, data transfer, success rates
-- 👥 **Client Management**: View all connected clients and their status
-- 🌍 **Multi-language**: English/Chinese interface with one-click switching
-- 🔄 **Auto-refresh**: Configurable real-time data updates
-- 🔐 **Secure Authentication**: Session-based login system
-- 📈 **Traffic Analytics**: Detailed connection and performance metrics
+- 📊 **Real-time Metrics**: Active connections, data transfer, success rates with automatic cleanup
+- 👥 **Client Management**: View all connected clients with online/offline detection
+- 🌍 **Multi-language**: Complete English/Chinese bilingual interface with persistent preferences
+- 🔄 **Auto-refresh**: 10-second configurable real-time data updates
+- 🔐 **Session Authentication**: 24-hour secure sessions with automatic renewal
+- 📈 **Memory-based Analytics**: Lightweight metrics with automatic inconsistency detection
 
 ### Client Dashboard
 
 **Access**: `http://YOUR_CLIENT_IP:8091`
-**No authentication required**
+**Authentication**: Optional (configurable)
 
 **Features:**
-- 🔍 **Connection Monitoring**: View all active proxy connections
-- 📊 **Performance Metrics**: Data transfer and uptime statistics
-- 🏥 **Health Status**: Gateway connectivity and local service checks
-- ⚙️ **Configuration View**: Current client settings and port forwards
+- 🔍 **Connection Monitoring**: Real-time view of all active proxy connections
+- 📊 **Performance Metrics**: Data transfer statistics and uptime tracking
+- 🎯 **Multi-client Support**: Track multiple client instances from single interface
+- ⚙️ **Runtime Information**: Client status, connection summaries, and system metrics
 
 ### API Endpoints
 
 **Gateway API:**
-- `GET /api/metrics/global` - Global system metrics
-- `GET /api/metrics/clients` - All client statistics  
-- `GET /api/metrics/connections` - Active connections
-- `POST /api/auth/login` - Authentication
-- `GET /api/ratelimit/config` - Rate limiting settings
+- `POST /api/auth/login` - Create 24-hour authenticated session
+- `POST /api/auth/logout` - Destroy current session
+- `GET /api/auth/check` - Verify authentication status
+- `GET /api/metrics/global` - Global system metrics (connections, data transfer, success rate)
+- `GET /api/metrics/clients` - All client statistics with online/offline status
+- `GET /api/metrics/connections` - Active connection details and traffic metrics
 
 **Client API:**
-- `GET /api/status` - Client runtime status
-- `GET /api/metrics/local` - Local performance metrics
-- `GET /api/metrics/connections` - Client connections
+- `POST /api/auth/login` - User login (if authentication enabled)
+- `POST /api/auth/logout` - User logout (if authentication enabled)
+- `GET /api/auth/check` - Check authentication status
+- `GET /api/status` - Client runtime status with connection summary
+- `GET /api/metrics/connections` - Connection metrics for all tracked client instances
 
 ## 🐳 Docker Deployment
 
@@ -593,20 +629,27 @@ services:
 
 ### Certificate Management
 
-> 💡 **Quick Testing**: The Docker image includes a pre-generated test certificate that works for localhost and common test scenarios. You can start testing immediately without generating your own certificates.
+> ⚠️ **Critical Certificate Information**: The Docker image includes a pre-generated test certificate that **ONLY works for localhost, 127.0.0.1, and anyproxy**. For remote gateway deployment, you **MUST** generate certificates with the correct IP/domain.
 
 ```bash
-# For production - Generate your own certificate
+# For remote gateway - Use the provided script (RECOMMENDED)
+./scripts/generate_certs.sh YOUR_GATEWAY_IP
+# or for domain:
+./scripts/generate_certs.sh gateway.yourdomain.com
+
+# Manual certificate generation (alternative)
 openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
-    -days 365 -nodes -subj "/CN=YOUR_DOMAIN"
+    -days 365 -nodes -subj "/CN=YOUR_DOMAIN" \
+    -addext "subjectAltName = IP:YOUR_IP,DNS:YOUR_DOMAIN"
 
 # Or use Let's Encrypt for production domains
 certbot certonly --standalone -d gateway.yourdomain.com
 
-# For testing - The Docker image includes:
-# - Test certificate valid for localhost, 127.0.0.1, anyproxy
-# - Allows immediate testing without certificate setup
-# - Located at /app/certs/ inside the container
+# Built-in test certificate limitations:
+# ❌ Does NOT work for remote IP addresses
+# ❌ Does NOT work for custom domains  
+# ✅ Only works for: localhost, 127.0.0.1, anyproxy
+# ✅ Use only for local development/testing
 ```
 
 ### Security Best Practices
@@ -621,8 +664,8 @@ certbot certonly --standalone -d gateway.yourdomain.com
 
 ### Basic Health Checks
 ```bash
-# Check gateway connectivity
-curl -x http://user:pass@gateway:8080 https://httpbin.org/ip
+# Check gateway connectivity (with group_id)
+curl -x http://user.mygroup:pass@gateway:8080 https://httpbin.org/ip
 
 # Check TUIC proxy port (UDP)
 nc -u -v gateway 9443
@@ -635,8 +678,8 @@ curl http://client:8091/api/status
 docker logs anyproxy-gateway
 docker logs anyproxy-client
 
-# Test specific service
-curl -x http://user:pass@gateway:8080 http://localhost:22
+# Test specific service (with group_id)
+curl -x http://user.mygroup:pass@gateway:8080 http://localhost:22
 ```
 
 ### Common Issues
@@ -652,22 +695,32 @@ curl -x http://user:pass@gateway:8080 http://localhost:22
 ```python
 import requests
 
+# With group_id (replace 'mygroup' with your group_id)
 proxies = {
-    'http': 'http://user:pass@gateway.com:8080',
-    'https': 'http://user:pass@gateway.com:8080'
+    'http': 'http://user.mygroup:pass@gateway.com:8080',
+    'https': 'http://user.mygroup:pass@gateway.com:8080'
 }
 
 response = requests.get('http://localhost:8000/api', proxies=proxies)
 print(response.json())
+
+# Without group_id (routes to default group)
+proxies_default = {
+    'http': 'http://user:pass@gateway.com:8080',
+    'https': 'http://user:pass@gateway.com:8080'
+}
 ```
 
 ### cURL Example
 ```bash
-# HTTP proxy
-curl -x http://user:pass@gateway:8080 http://localhost:3000
+# HTTP proxy (with group_id - replace 'mygroup' with your group_id)
+curl -x http://user.mygroup:pass@gateway:8080 http://localhost:3000
 
-# SOCKS5 proxy
-curl --socks5 user:pass@gateway:1080 http://localhost:22
+# SOCKS5 proxy (with group_id)
+curl --socks5 user.mygroup:pass@gateway:1080 http://localhost:22
+
+# Without group_id (routes to default group)
+curl -x http://user:pass@gateway:8080 http://localhost:3000
 ```
 
 ### Clash Configuration
@@ -705,8 +758,8 @@ proxies:
 # Start client  
 ./anyproxy-client --config client.yaml
 
-# Test connection
-curl -x http://user:pass@gateway:8080 https://httpbin.org/ip
+# Test connection (with group_id - replace 'mygroup' with your group_id)
+curl -x http://user.mygroup:pass@gateway:8080 https://httpbin.org/ip
 
 # Access web interface
 open http://gateway:8090  # Gateway dashboard

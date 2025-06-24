@@ -109,8 +109,8 @@ func TestReadNextMessage(t *testing.T) {
 		{
 			name: "binary port forward response",
 			readData: protocol.PackPortForwardResponseMessage(true, "", []protocol.PortForwardStatus{
-				{Port: 8080, Success: true},
-				{Port: 8081, Success: false},
+				{Port: 18080, Success: true},
+				{Port: 18081, Success: false},
 			}),
 			expectErr:  false,
 			expectType: "port_forward_response",
@@ -119,11 +119,11 @@ func TestReadNextMessage(t *testing.T) {
 					t.Error("Expected success to be true")
 				}
 				if ports, ok := msg["ports"].(map[int]bool); ok {
-					if !ports[8080] {
-						t.Error("Expected port 8080 to be successful")
+					if !ports[18080] {
+						t.Error("Expected port 18080 to be successful")
 					}
-					if ports[8081] {
-						t.Error("Expected port 8081 to be unsuccessful")
+					if ports[18081] {
+						t.Error("Expected port 18081 to be unsuccessful")
 					}
 				} else {
 					t.Error("Expected ports to be map[int]bool")

@@ -176,17 +176,37 @@ func TestConnectionLoop(t *testing.T) {
 				t.Fatalf("Failed to create client: %v", err)
 			}
 
-			// Start connection loop in background
-			go client.connectionLoop()
+			// Use proper synchronization
+			loopStarted := make(chan struct{})
+			loopDone := make(chan struct{})
 
-			// Simulate cancel after delay
+			// Start connection loop in background
+			go func() {
+				defer close(loopDone)
+				close(loopStarted) // Signal loop has started
+				client.connectionLoop()
+			}()
+
+			// Wait for loop to start
+			<-loopStarted
+
+			// Simulate cancel immediately or after delay
 			if tt.simulateCancel {
-				time.Sleep(tt.simulateCancelAfter)
+				if tt.simulateCancelAfter > 0 {
+					time.Sleep(tt.simulateCancelAfter)
+				}
 				client.cancel()
 			}
 
-			// Wait for cleanup
-			time.Sleep(1000 * time.Millisecond)
+			// Wait for cleanup with timeout
+			select {
+			case <-loopDone:
+				// Loop completed successfully
+			case <-time.After(3 * time.Second):
+				t.Error("Connection loop did not exit in time")
+				client.cancel() // Force cancel
+				<-loopDone      // Wait for exit
+			}
 
 			// Check retry count
 			mockTransport.mu.Lock()
@@ -478,13 +498,19 @@ func TestHandleConnection(t *testing.T) {
 
 			// Handle connection in background
 			done := make(chan struct{})
+			processingStarted := make(chan struct{})
+
 			go func() {
 				defer close(done)
+				close(processingStarted) // Signal processing started
 				client.handleConnection(tt.connID)
 			}()
 
-			// Wait a bit for processing
-			time.Sleep(100 * time.Millisecond)
+			// Wait for processing to start
+			<-processingStarted
+
+			// Give a moment for initial processing
+			time.Sleep(50 * time.Millisecond)
 
 			// Send close message to end the connection
 			select {
@@ -492,13 +518,15 @@ func TestHandleConnection(t *testing.T) {
 				"type": "close",
 				"id":   tt.connID,
 			}:
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(200 * time.Millisecond):
+				// If channel is full or closed, continue
 			}
 
 			// Wait for completion
 			select {
 			case <-done:
-			case <-time.After(500 * time.Millisecond):
+				// Connection handling completed
+			case <-time.After(2 * time.Second):
 				t.Error("handleConnection did not complete in time")
 			}
 

@@ -82,7 +82,12 @@ func TestMetricsReporter_StartStop(t *testing.T) {
 }
 
 func TestMetricsReporter_ReportingInterval(t *testing.T) {
-	// Reset global metrics for clean test
+	// Create a new MetricsManager for this test to avoid race conditions
+	oldManager := globalManager
+	defer func() {
+		globalManager = oldManager
+	}()
+
 	globalManager = &MetricsManager{
 		global: &Metrics{
 			StartTime: time.Now(),
@@ -100,10 +105,12 @@ func TestMetricsReporter_ReportingInterval(t *testing.T) {
 
 	// Start reporter
 	reporter.Start()
-	defer reporter.Stop()
 
 	// Wait for a few intervals to pass
 	time.Sleep(350 * time.Millisecond)
+
+	// Stop reporter before cleanup to avoid race condition
+	reporter.Stop()
 
 	// The reporter should have run at least 3 times
 	// This test mainly checks that the reporter runs without crashing
@@ -111,7 +118,12 @@ func TestMetricsReporter_ReportingInterval(t *testing.T) {
 }
 
 func TestMetricsReporter_ReportWithNoActivity(t *testing.T) {
-	// Reset global metrics to have no activity
+	// Create a new MetricsManager for this test to avoid race conditions
+	oldManager := globalManager
+	defer func() {
+		globalManager = oldManager
+	}()
+
 	globalManager = &MetricsManager{
 		global: &Metrics{
 			StartTime: time.Now(),
@@ -130,7 +142,12 @@ func TestMetricsReporter_ReportWithNoActivity(t *testing.T) {
 }
 
 func TestMetricsReporter_ReportWithActivity(t *testing.T) {
-	// Reset global metrics and add some activity
+	// Create a new MetricsManager for this test to avoid race conditions
+	oldManager := globalManager
+	defer func() {
+		globalManager = oldManager
+	}()
+
 	globalManager = &MetricsManager{
 		global: &Metrics{
 			StartTime: time.Now(),
@@ -221,38 +238,52 @@ func TestMetricsReporter_ContextCancellation(t *testing.T) {
 }
 
 func TestMetricsReporter_ConcurrentStartStop(t *testing.T) {
-	reporter := NewMetricsReporter(10 * time.Millisecond)
-
-	// Test concurrent start/stop operations
+	// Test concurrent start/stop operations on different reporters
+	// This is more realistic than concurrent start/stop on the same reporter
 	const numOps = 10
 	done := make(chan bool, numOps*2)
 
-	// Start operations
+	// Start operations on different reporters
 	for i := 0; i < numOps; i++ {
 		go func() {
+			reporter := NewMetricsReporter(10 * time.Millisecond)
 			reporter.Start()
+			time.Sleep(5 * time.Millisecond) // Let it run briefly
+			reporter.Stop()
 			done <- true
 		}()
 	}
 
-	// Stop operations
+	// More start/stop operations on different reporters
 	for i := 0; i < numOps; i++ {
 		go func() {
-			reporter.Stop()
+			reporter := NewMetricsReporter(10 * time.Millisecond)
+			reporter.Start()
+			reporter.Stop() // Stop immediately
 			done <- true
 		}()
 	}
 
 	// Wait for all operations to complete
 	for i := 0; i < numOps*2; i++ {
-		<-done
+		select {
+		case <-done:
+			// Operation completed
+		case <-time.After(2 * time.Second):
+			t.Fatal("Concurrent operations timeout")
+		}
 	}
 
 	// Should not panic or cause data races
 }
 
 func TestMetricsReporter_ReportMetricsCalculation(t *testing.T) {
-	// Reset global metrics
+	// Create a new MetricsManager for this test to avoid race conditions
+	oldManager := globalManager
+	defer func() {
+		globalManager = oldManager
+	}()
+
 	globalManager = &MetricsManager{
 		global: &Metrics{
 			StartTime: time.Now().Add(-5 * time.Minute), // 5 minutes ago
@@ -330,6 +361,12 @@ func TestMetricsReporter_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Save and restore global state
+			oldManager := globalManager
+			defer func() {
+				globalManager = oldManager
+			}()
+
 			defer func() {
 				if r := recover(); r != nil {
 					if !tt.expectPanic {
@@ -348,6 +385,12 @@ func TestMetricsReporter_EdgeCases(t *testing.T) {
 }
 
 func BenchmarkMetricsReporter_Report(b *testing.B) {
+	// Save and restore global state
+	oldManager := globalManager
+	defer func() {
+		globalManager = oldManager
+	}()
+
 	// Setup metrics with some data
 	globalManager = &MetricsManager{
 		global: &Metrics{

@@ -33,9 +33,9 @@ func TestSendPortForwardingRequest(t *testing.T) {
 			name: "single port",
 			openPorts: []config.OpenPort{
 				{
-					RemotePort: 8080,
+					RemotePort: 18080,
 					LocalHost:  "localhost",
-					LocalPort:  8080,
+					LocalPort:  18080,
 					Protocol:   "tcp",
 				},
 			},
@@ -45,9 +45,9 @@ func TestSendPortForwardingRequest(t *testing.T) {
 		{
 			name: "multiple ports",
 			openPorts: []config.OpenPort{
-				{RemotePort: 8080, LocalHost: "localhost", LocalPort: 8080, Protocol: "tcp"},
-				{RemotePort: 8081, LocalHost: "127.0.0.1", LocalPort: 9090, Protocol: "tcp"},
-				{RemotePort: 8082, LocalHost: "localhost", LocalPort: 8082, Protocol: "udp"},
+				{RemotePort: 18080, LocalHost: "localhost", LocalPort: 18080, Protocol: "tcp"},
+				{RemotePort: 18081, LocalHost: "127.0.0.1", LocalPort: 9090, Protocol: "tcp"},
+				{RemotePort: 18082, LocalHost: "localhost", LocalPort: 18082, Protocol: "udp"},
 			},
 			expectErr:  false,
 			expectCall: true,
@@ -55,7 +55,7 @@ func TestSendPortForwardingRequest(t *testing.T) {
 		{
 			name: "write error",
 			openPorts: []config.OpenPort{
-				{RemotePort: 8080, LocalHost: "localhost", LocalPort: 8080, Protocol: "tcp"},
+				{RemotePort: 18080, LocalHost: "localhost", LocalPort: 18080, Protocol: "tcp"},
 			},
 			writeErr:   errors.New("write failed"),
 			expectErr:  true,
@@ -125,11 +125,11 @@ func TestHandlePortForwardResponse(t *testing.T) {
 				"success": true,
 				"port_statuses": []interface{}{
 					map[string]interface{}{
-						"port":    float64(8080),
+						"port":    float64(18080),
 						"success": true,
 					},
 					map[string]interface{}{
-						"port":    float64(8081),
+						"port":    float64(18081),
 						"success": false,
 					},
 				},
@@ -150,7 +150,7 @@ func TestHandlePortForwardResponse(t *testing.T) {
 				"port_statuses": []interface{}{
 					"invalid status", // Invalid format
 					map[string]interface{}{
-						"port":    float64(8080),
+						"port":    float64(18080),
 						"success": true,
 					},
 				},
