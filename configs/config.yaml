@@ -36,7 +36,7 @@ gateway:
 client:
   id: "client-id"
   group_id: "example-group"
-  group_password: "password1"
+  group_password: "password"
   replicas: 3
   gateway:
     addr: "127.0.0.1:9091"

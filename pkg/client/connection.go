@@ -143,7 +143,7 @@ func (c *Client) connect() error {
 func (c *Client) cleanup() {
 	logger.Debug("Starting cleanup after connection loss", "client_id", c.getClientID())
 
-	// 🆕 Stop transport layer connection
+	// 🆕 Stop transport layer connection first to stop new message processing
 	if c.conn != nil {
 		logger.Debug("Stopping transport connection during cleanup", "client_id", c.getClientID())
 		if err := c.conn.Close(); err != nil {
@@ -163,8 +163,9 @@ func (c *Client) cleanup() {
 		c.connMgr.CloseAllMessageChannels()
 	}
 
-	// Reset message handler
-	c.msgHandler = nil
+	// Don't reset msgHandler here to avoid race conditions with ongoing goroutines
+	// msgHandler will be replaced when new connection is established
+	// This prevents nil pointer dereference while allowing proper cleanup
 
 	logger.Debug("Cleanup completed", "client_id", c.getClientID(), "connections_closed", connectionCount)
 }

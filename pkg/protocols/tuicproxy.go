@@ -202,11 +202,13 @@ func (p *TUICProxy) Stop() error {
 		}
 	}
 
-	// Close all UDP sessions
+	// Close all UDP sessions aggressively
 	p.udpSessionsMu.Lock()
+	sessionCount := 0
 	for _, clientSessions := range p.udpSessions {
 		for _, session := range clientSessions {
 			if session.TargetConn != nil {
+				sessionCount++
 				// Set read deadline to immediately unblock any pending ReadFrom calls
 				if err := session.TargetConn.SetReadDeadline(time.Now()); err != nil {
 					logger.Error("Failed to set read deadline during UDP session shutdown", "err", err)
@@ -219,8 +221,25 @@ func (p *TUICProxy) Stop() error {
 	}
 	p.udpSessionsMu.Unlock()
 
+	if sessionCount > 0 {
+		logger.Debug("Closed UDP sessions during shutdown", "session_count", sessionCount)
+	}
+
 	logger.Debug("Waiting for TUIC proxy goroutines to finish")
-	p.wg.Wait()
+
+	// Wait for goroutines with timeout to prevent indefinite blocking
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logger.Debug("All TUIC proxy goroutines finished gracefully")
+	case <-time.After(3 * time.Second):
+		logger.Warn("Timeout waiting for TUIC proxy goroutines to finish")
+	}
 
 	logger.Info("TUIC proxy stopped")
 	return nil

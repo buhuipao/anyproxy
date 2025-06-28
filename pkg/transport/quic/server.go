@@ -27,19 +27,28 @@ type quicTransport struct {
 	mu         sync.Mutex
 	running    bool
 	authConfig *transport.AuthConfig
+	ctx        context.Context    // Add cancellable context
+	cancel     context.CancelFunc // Add cancel function
 }
 
 var _ transport.Transport = (*quicTransport)(nil)
 
 // NewQUICTransport creates a new QUIC transport
 func NewQUICTransport() transport.Transport {
-	return &quicTransport{}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &quicTransport{
+		ctx:    ctx,
+		cancel: cancel,
+	}
 }
 
 // NewQUICTransportWithAuth creates a new QUIC transport with authentication
 func NewQUICTransportWithAuth(authConfig *transport.AuthConfig) transport.Transport {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &quicTransport{
 		authConfig: authConfig,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -108,8 +117,13 @@ func (t *quicTransport) listenAndServe(addr string, handler func(transport.Conne
 	go func() {
 		logger.Info("Starting QUIC server", "addr", addr)
 		for {
-			conn, err := listener.Accept(context.Background())
+			conn, err := listener.Accept(t.ctx)
 			if err != nil {
+				// Check if error is due to context cancellation (normal shutdown)
+				if t.ctx.Err() != nil {
+					logger.Debug("QUIC server accept loop stopped due to context cancellation")
+					return
+				}
 				logger.Error("QUIC server accept error", "err", err)
 				return
 			}
@@ -129,8 +143,13 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Debug("New QUIC connection accepted", "remote_addr", conn.RemoteAddr())
 
 	// Accept the first stream
-	stream, err := conn.AcceptStream(context.Background())
+	stream, err := conn.AcceptStream(t.ctx)
 	if err != nil {
+		// Check if error is due to context cancellation (normal shutdown)
+		if t.ctx.Err() != nil {
+			logger.Debug("QUIC stream accept stopped due to context cancellation", "remote_addr", conn.RemoteAddr())
+			return
+		}
 		logger.Error("Failed to accept QUIC stream", "err", err)
 		if err := conn.CloseWithError(0, "failed to accept stream"); err != nil {
 			logger.Warn("Error closing QUIC connection after stream accept failure", "err", err)
@@ -290,6 +309,13 @@ func (t *quicTransport) Close() error {
 
 	logger.Info("Stopping QUIC server")
 
+	// Step 1: Cancel context to stop accept loops
+	if t.cancel != nil {
+		logger.Debug("Cancelling QUIC server context")
+		t.cancel()
+	}
+
+	// Step 2: Close listener
 	if t.listener != nil {
 		err := t.listener.Close()
 		if err != nil {
