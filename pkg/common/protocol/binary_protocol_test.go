@@ -452,3 +452,110 @@ func TestBinaryProtocolDataMessage(t *testing.T) {
 		t.Errorf("Large data mismatch. Expected length: %d, Got length: %d", len(largeData), len(unpackedData))
 	}
 }
+
+func TestErrorMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		errorMsg string
+	}{
+		{
+			name:     "simple error",
+			errorMsg: "connection failed",
+		},
+		{
+			name:     "empty error",
+			errorMsg: "",
+		},
+		{
+			name:     "unicode error",
+			errorMsg: "连接失败: 网络不可达 🚫",
+		},
+		{
+			name:     "long error message",
+			errorMsg: "This is a very long error message that describes in detail what went wrong during the connection process. It contains multiple sentences and explains the root cause of the failure.",
+		},
+		{
+			name:     "error with special characters",
+			errorMsg: `Error: "Connection refused" - Host unreachable (Code: 123) @2023-12-01`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pack error message
+			packed := PackErrorMessage(tt.errorMsg)
+
+			// Verify it's a binary message
+			if !IsBinaryMessage(packed) {
+				t.Error("Expected binary message")
+			}
+
+			// Unpack header
+			version, msgType, payload, err := UnpackBinaryHeader(packed)
+			if err != nil {
+				t.Fatalf("Failed to unpack header: %v", err)
+			}
+
+			if version != BinaryProtocolVersion {
+				t.Errorf("Expected version %d, got %d", BinaryProtocolVersion, version)
+			}
+
+			if msgType != BinaryMsgTypeError {
+				t.Errorf("Expected message type %d, got %d", BinaryMsgTypeError, msgType)
+			}
+
+			// Unpack error message
+			unpackedErrorMsg, err := UnpackErrorMessage(payload)
+			if err != nil {
+				t.Fatalf("Failed to unpack error message: %v", err)
+			}
+
+			// Verify error message
+			if unpackedErrorMsg != tt.errorMsg {
+				t.Errorf("Error message mismatch: got %q, want %q", unpackedErrorMsg, tt.errorMsg)
+			}
+		})
+	}
+}
+
+func TestErrorMessageEdgeCases(t *testing.T) {
+	t.Run("invalid error message data", func(t *testing.T) {
+		// Test with data too short
+		_, err := UnpackErrorMessage([]byte{})
+		if err == nil {
+			t.Error("Expected error for empty data")
+		}
+
+		_, err = UnpackErrorMessage([]byte{0x00})
+		if err == nil {
+			t.Error("Expected error for data too short")
+		}
+
+		// Test with invalid length
+		invalidData := []byte{0x00, 0xFF} // Length 255 but no data
+		_, err = UnpackErrorMessage(invalidData)
+		if err == nil {
+			t.Error("Expected error for invalid length")
+		}
+	})
+
+	t.Run("maximum length error message", func(t *testing.T) {
+		// Test with maximum possible error message length (65535 bytes)
+		maxErrorMsg := string(bytes.Repeat([]byte("E"), 65535))
+
+		packed := PackErrorMessage(maxErrorMsg)
+		_, _, payload, err := UnpackBinaryHeader(packed)
+		if err != nil {
+			t.Fatalf("Failed to unpack header: %v", err)
+		}
+
+		unpackedErrorMsg, err := UnpackErrorMessage(payload)
+		if err != nil {
+			t.Fatalf("Failed to unpack max length error message: %v", err)
+		}
+
+		if unpackedErrorMsg != maxErrorMsg {
+			t.Errorf("Max length error message mismatch: got length %d, want length %d", len(unpackedErrorMsg), len(maxErrorMsg))
+		}
+	})
+}

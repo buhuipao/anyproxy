@@ -10,25 +10,20 @@ log:
   max_age: 30             
   compress: true          
 
-proxy:
-  socks5:
-    listen_addr: ":1080"
-    auth_username: "user"
-    auth_password: "password"
-  http:
-    listen_addr: ":8080"
-    auth_username: "user"
-    auth_password: "password"
-
-transport:
-  type: "grpc"
-
 gateway:
-  listen_addr: ":8443"
+  listen_addr: ":9091"
+  transport_type: "quic"
   tls_cert: "certs/server.crt"
   tls_key: "certs/server.key"
   auth_username: "gateway_user"
   auth_password: "gateway_password"
+  proxy:
+    socks5:
+      listen_addr: ":1080"
+    http:
+      listen_addr: ":8080"
+    tuic:
+      listen_addr: ":9443"
   web:
     enabled: true
     listen_addr: ":8090"
@@ -39,19 +34,20 @@ gateway:
     session_key: "change-this-secret-key"
 
 client:
-  gateway_addr: "127.0.0.1:8443"
-  gateway_tls_cert: "certs/server.crt"
-  client_id: "client"
-  # group_id: "example-group"
+  id: "client-id"
+  group_id: "example-group"
+  group_password: "password1"
   replicas: 3
-  auth_username: "gateway_user"
-  auth_password: "gateway_password"
+  gateway:
+    addr: "127.0.0.1:9091"
+    transport_type: "quic"
+    tls_cert: "certs/server.crt"
+    auth_username: "gateway_user"
+    auth_password: "gateway_password"
   forbidden_hosts:
     - "0.0.0.0"
-    # - "127.0.0.1"  # Commented out to allow port forwarding to local services
-    # - "localhost"  # Commented out to allow port forwarding to local services
-    - "192.168.1.1"
-    - "internal.example.com"
+    - "192.168.0.0/16"
+    - "127.0.0.1"
   allowed_hosts:
     - "example.com"
     - "example.org"

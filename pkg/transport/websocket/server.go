@@ -153,11 +153,12 @@ func (s *webSocketTransport) handleWebSocket(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Get group ID
+	// Get group ID and group password
 	groupID := r.Header.Get("X-Group-ID")
+	groupPassword := r.Header.Get("X-Group-Password") // Get group password from header
 	logger.Debug("WebSocket connection attempt", "client_id", clientID, "group_id", groupID, "remote_addr", r.RemoteAddr)
 
-	// Authentication check
+	// Authentication check (Gateway transport layer auth)
 	if s.authConfig != nil && s.authConfig.Username != "" {
 		username, password, ok := r.BasicAuth()
 		if !ok {
@@ -185,7 +186,7 @@ func (s *webSocketTransport) handleWebSocket(w http.ResponseWriter, r *http.Requ
 	logger.Debug("WebSocket connection upgraded successfully", "client_id", clientID)
 
 	// Create connection wrapper with client information
-	wsConn := NewWebSocketConnectionWithInfo(conn, clientID, groupID)
+	wsConn := NewWebSocketConnectionWithInfo(conn, clientID, groupID, groupPassword)
 
 	logger.Info("Client connected", "client_id", clientID, "group_id", groupID, "remote_addr", r.RemoteAddr)
 

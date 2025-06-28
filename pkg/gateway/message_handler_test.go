@@ -60,6 +60,10 @@ func (m *mockTransportConn) GetGroupID() string {
 	return "test-group"
 }
 
+func (m *mockTransportConn) GetPassword() string {
+	return "test-password"
+}
+
 func (m *mockTransportConn) SetDeadline(t time.Time) error {
 	return nil
 }

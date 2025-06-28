@@ -77,9 +77,9 @@ RUN mkdir -p logs && \
 USER anyproxy
 
 # Expose ports
-# HTTP Proxy, SOCKS5 Proxy, TUIC Proxy (UDP), WebSocket Transport, gRPC Transport, QUIC Transport
+# HTTP Proxy, SOCKS5 Proxy, TUIC Proxy (UDP), WebSocket Transport, gRPC Transport, QUIC Transport (UDP)
 # Web management interfaces (Gateway: 8090, Client: 8091)
-EXPOSE 8080 1080 9443/udp 8443 9090 9091 8090 8091
+EXPOSE 8080 1080 9443/udp 8443 9090 9091/udp 8090 8091
 
 # Health check - works for both gateway and client
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

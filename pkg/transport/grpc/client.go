@@ -56,10 +56,11 @@ func (t *grpcTransport) dialGRPCWithConfig(addr string, config *transport.Client
 
 	// Set up metadata with client info and authentication
 	md := metadata.New(map[string]string{
-		"client-id": config.ClientID,
-		"group-id":  config.GroupID,
-		"username":  config.Username,
-		"password":  config.Password,
+		"client-id":      config.ClientID,
+		"group-id":       config.GroupID,
+		"group-password": config.GroupPassword,
+		"username":       config.Username, // Gateway transport auth username
+		"password":       config.Password, // Gateway transport auth password
 	})
 
 	// Create context with metadata
@@ -78,6 +79,6 @@ func (t *grpcTransport) dialGRPCWithConfig(addr string, config *transport.Client
 	logger.Info("gRPC stream established successfully", "client_id", config.ClientID)
 
 	// Create and return connection wrapper
-	grpcConn := newGRPCConnection(stream, conn, config.ClientID, config.GroupID)
+	grpcConn := newGRPCConnection(stream, conn, config.ClientID, config.GroupID, config.GroupPassword)
 	return grpcConn, nil
 }

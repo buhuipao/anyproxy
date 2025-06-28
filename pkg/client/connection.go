@@ -4,9 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
-	"reflect"
 	"strings"
 	"time"
 
@@ -19,122 +17,104 @@ import (
 
 // connectionLoop handles connection and reconnection logic using transport layer
 func (c *Client) connectionLoop() {
-	logger.Debug("Starting connection loop", "client_id", c.getClientID())
-
-	backoff := 1 * time.Second
-	maxBackoff := 60 * time.Second
-	connectionAttempts := 0
+	maxRetryDelay := 30 * time.Second
+	currentDelay := 1 * time.Second
+	maxConsecutiveFailures := 20
+	consecutiveFailures := 0
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			logger.Debug("Connection loop stopping due to context cancellation", "client_id", c.getClientID(), "total_attempts", connectionAttempts)
+			logger.Debug("Client context cancelled, stopping connection loop", "client_id", c.getClientID())
 			return
 		default:
 		}
 
-		connectionAttempts++
-		logger.Debug("Attempting to connect to gateway", "client_id", c.getClientID(), "attempt", connectionAttempts, "gateway_addr", c.config.GatewayAddr)
+		// Attempt connection
+		attemptStartTime := time.Now()
 
-		// Attempt to connect (🆕 using transport layer abstraction)
+		logger.Debug("Attempting connection to gateway", "client_id", c.getClientID(), "attempt", consecutiveFailures+1, "max_consecutive_failures", maxConsecutiveFailures, "current_delay", currentDelay, "max_retry_delay", maxRetryDelay, "gateway_addr", c.config.Gateway.Addr)
+
 		if err := c.connect(); err != nil {
-			logger.Error("Failed to connect to gateway", "client_id", c.getClientID(), "attempt", connectionAttempts, "err", err, "retrying_in", backoff)
+			// generate new client ID for next connection attempt
+			c.actualID = generateClientID(c.config.ClientID, c.replicaIdx)
+			consecutiveFailures++
+			elapsedTime := time.Since(attemptStartTime)
 
-			// 🆕 Update connection state to disconnected with error
-
-			// Add jitter to avoid thundering herd problem
-			// Using math/rand is intentional, we don't need cryptographically secure random numbers here
-			jitter := time.Duration(rand.Int63n(int64(backoff) / 4)) //nolint:gosec // jitter doesn't require crypto rand
-			sleepTime := backoff + jitter
-
-			// Wait for retry
-			select {
-			case <-c.ctx.Done():
-				logger.Debug("Connection retry cancelled due to context", "client_id", c.getClientID())
+			if consecutiveFailures >= maxConsecutiveFailures {
+				logger.Error("Maximum consecutive connection failures reached", "client_id", c.getClientID(), "consecutive_failures", consecutiveFailures, "max_consecutive_failures", maxConsecutiveFailures, "total_time_elapsed", elapsedTime, "gateway_addr", c.config.Gateway.Addr)
 				return
-			case <-time.After(sleepTime):
 			}
 
-			// Exponential backoff
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
+			// Log connection failure
+			logger.Error("Connection attempt failed", "client_id", c.getClientID(), "err", err, "consecutive_failures", consecutiveFailures, "max_consecutive_failures", maxConsecutiveFailures, "time_elapsed", elapsedTime, "retry_delay", currentDelay, "gateway_addr", c.config.Gateway.Addr)
+
+			// Wait before retry with exponential backoff
+			select {
+			case <-c.ctx.Done():
+				logger.Debug("Client context cancelled during retry wait", "client_id", c.getClientID())
+				return
+			case <-time.After(currentDelay):
+				currentDelay = time.Duration(float64(currentDelay) * 1.5)
+				if currentDelay > maxRetryDelay {
+					currentDelay = maxRetryDelay
+				}
 			}
 			continue
 		}
 
-		// Reset backoff
-		backoff = 1 * time.Second
-		logger.Info("Successfully connected to gateway", "client_id", c.getClientID(), "attempt", connectionAttempts, "gateway_addr", c.config.GatewayAddr)
+		// Reset on successful connection
+		consecutiveFailures = 0
+		currentDelay = 1 * time.Second
+		logger.Info("Connection to gateway established successfully", "client_id", c.getClientID(), "gateway_addr", c.config.Gateway.Addr)
 
-		// Handle messages
+		// Connection successful - this will block until connection is lost
 		c.handleMessages()
 
-		// Check if stopping
-		select {
-		case <-c.ctx.Done():
-			logger.Debug("Connection loop ending due to context cancellation", "client_id", c.getClientID())
-			return
-		default:
-		}
-
-		// Connection lost, clean up and retry
-		logger.Info("Connection to gateway lost, cleaning up and retrying...", "client_id", c.getClientID(), "total_attempts", connectionAttempts)
-
-		// 🆕 Update connection state to disconnected
-
+		// Connection lost - cleanup resources before retry
+		logger.Warn("Connection to gateway lost, cleaning up resources before retry", "client_id", c.getClientID(), "gateway_addr", c.config.Gateway.Addr)
 		c.cleanup()
 	}
 }
 
-// connect establishes a connection to the gateway using transport layer abstraction
+// connect establishes connection to the gateway
 func (c *Client) connect() error {
-	logger.Debug("Establishing connection to gateway", "client_id", c.getClientID(), "gateway_addr", c.config.GatewayAddr)
+	logger.Debug("Establishing connection to gateway", "client_id", c.getClientID(), "gateway_addr", c.config.Gateway.Addr)
 
-	c.actualID = c.generateClientID()
-
-	// 🆕 Notify web server of actual client ID change
-	if c.webServer != nil {
-		// Use reflection to call SetActualClientID method
-		if webServerValue := reflect.ValueOf(c.webServer); webServerValue.IsValid() {
-			if method := webServerValue.MethodByName("SetActualClientID"); method.IsValid() {
-				method.Call([]reflect.Value{reflect.ValueOf(c.actualID)})
-				logger.Debug("Updated web server with actual client ID", "actual_id", c.actualID)
-			}
-		}
-	}
-
-	// 🆕 Create TLS configuration
+	// Create TLS configuration if needed
 	var tlsConfig *tls.Config
-	if c.config.GatewayTLSCert != "" || strings.HasPrefix(c.config.GatewayAddr, "wss://") {
-		logger.Debug("Creating TLS configuration", "client_id", c.actualID)
-		var err error
+	var err error
+
+	// Auto-detect TLS requirement
+	// Check if TLS certificate is provided OR if using WSS/HTTPS scheme
+	needsTLS := c.config.Gateway.TLSCert != "" || strings.HasPrefix(c.config.Gateway.Addr, "wss://")
+	if needsTLS {
 		tlsConfig, err = c.createTLSConfig()
 		if err != nil {
-			logger.Error("Failed to create TLS configuration", "client_id", c.actualID, "gateway_addr", c.config.GatewayAddr, "err", err)
+			logger.Error("Failed to create TLS configuration", "client_id", c.actualID, "gateway_addr", c.config.Gateway.Addr, "err", err)
 			return fmt.Errorf("failed to create TLS configuration: %v", err)
 		}
-		logger.Debug("TLS configuration created successfully", "client_id", c.actualID)
+		logger.Debug("TLS configuration created successfully", "client_id", c.actualID, "gateway_addr", c.config.Gateway.Addr)
 	}
 
-	// 🆕 Create transport layer client configuration
+	// 🆕 Create transport configuration with client information
 	transportConfig := &transport.ClientConfig{
-		ClientID:   c.actualID,
-		GroupID:    c.config.GroupID,
-		Username:   c.config.AuthUsername,
-		Password:   c.config.AuthPassword,
-		TLSCert:    c.config.GatewayTLSCert,
-		TLSConfig:  tlsConfig, // 🆕 Pass TLS configuration
-		SkipVerify: false,     // Configure as needed
+		ClientID:      c.actualID,
+		GroupID:       c.config.GroupID,
+		Username:      c.config.Gateway.AuthUsername,
+		Password:      c.config.Gateway.AuthPassword, // Gateway authentication
+		GroupPassword: c.config.GroupPassword,        // Client group password for proxy auth
+		TLSConfig:     tlsConfig,
+		SkipVerify:    false, // Use proper certificate verification by default
 	}
 
-	logger.Debug("Transport configuration created", "client_id", c.actualID, "group_id", c.config.GroupID, "auth_enabled", c.config.AuthUsername != "", "tls_enabled", tlsConfig != nil)
+	logger.Debug("Transport configuration created", "client_id", c.actualID, "group_id", c.config.GroupID, "auth_enabled", c.config.Gateway.AuthUsername != "", "tls_enabled", tlsConfig != nil)
 
-	// 🆕 Connect using transport layer
-	conn, err := c.transport.DialWithConfig(c.config.GatewayAddr, transportConfig)
+	// 🆕 Connect via transport layer
+	conn, err := c.transport.DialWithConfig(c.config.Gateway.Addr, transportConfig)
 	if err != nil {
-		logger.Error("Failed to connect via transport layer", "client_id", c.actualID, "gateway_addr", c.config.GatewayAddr, "err", err)
-		return fmt.Errorf("failed to connect via transport: %v", err)
+		logger.Error("Failed to connect via transport layer", "client_id", c.actualID, "gateway_addr", c.config.Gateway.Addr, "err", err)
+		return fmt.Errorf("failed to connect: %v", err)
 	}
 
 	c.conn = conn
@@ -169,6 +149,7 @@ func (c *Client) cleanup() {
 		if err := c.conn.Close(); err != nil {
 			logger.Debug("Error closing client connection during stop (expected)", "err", err)
 		}
+		c.conn = nil // Reset connection to prevent double close
 		logger.Debug("Transport connection stopped", "client_id", c.getClientID())
 	}
 
@@ -181,6 +162,9 @@ func (c *Client) cleanup() {
 		c.connMgr.CloseAllConnections()
 		c.connMgr.CloseAllMessageChannels()
 	}
+
+	// Reset message handler
+	c.msgHandler = nil
 
 	logger.Debug("Cleanup completed", "client_id", c.getClientID(), "connections_closed", connectionCount)
 }

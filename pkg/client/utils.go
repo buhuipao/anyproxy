@@ -15,8 +15,8 @@ func (c *Client) getClientID() string {
 }
 
 // generateClientID generates a unique client ID
-func (c *Client) generateClientID() string {
-	// Fix: Include replica index in generated ID to ensure uniqueness
-	generatedID := fmt.Sprintf("%s-r%d-%s", c.config.ClientID, c.replicaIdx, xid.New().String())
+func generateClientID(clientID string, replicaIdx int) string {
+	// Include replica index in generated ID to ensure uniqueness
+	generatedID := fmt.Sprintf("%s-r%d-%s", clientID, replicaIdx, xid.New().String())
 	return generatedID
 }

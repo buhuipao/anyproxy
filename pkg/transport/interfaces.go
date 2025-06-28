@@ -36,17 +36,19 @@ type Connection interface {
 	// Client information - must be implemented by all transport layers
 	GetClientID() string
 	GetGroupID() string
+	GetPassword() string // Get the client password for group credential management
 }
 
 // ClientConfig client configuration
 type ClientConfig struct {
-	ClientID   string
-	GroupID    string
-	Username   string
-	Password   string
-	TLSCert    string
-	TLSConfig  *tls.Config
-	SkipVerify bool
+	ClientID      string
+	Username      string
+	Password      string // Gateway authentication password
+	GroupID       string
+	GroupPassword string // Client group password for proxy authentication
+	TLSCert       string
+	TLSConfig     *tls.Config
+	SkipVerify    bool
 }
 
 // ConnectionHandler connection handler function type

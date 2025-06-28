@@ -23,10 +23,11 @@ type writeRequest struct {
 
 // quicConnection implements transport.Connection for QUIC streams
 type quicConnection struct {
-	stream   quic.Stream
-	conn     quic.Connection
-	clientID string
-	groupID  string
+	stream        quic.Stream
+	conn          quic.Connection
+	clientID      string
+	groupID       string
+	groupPassword string // Client password for group credential management
 	// 🆕 Remove mutex, use async writes instead
 	writeChan chan *writeRequest // 🆕 Async write queue
 	closed    bool
@@ -41,20 +42,21 @@ type quicConnection struct {
 var _ transport.Connection = (*quicConnection)(nil)
 
 // newQUICConnection creates a new QUIC connection wrapper
-func newQUICConnection(stream quic.Stream, conn quic.Connection, clientID, groupID string) *quicConnection {
+func newQUICConnection(stream quic.Stream, conn quic.Connection, clientID, groupID, groupPassword string) *quicConnection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &quicConnection{
-		stream:    stream,
-		conn:      conn,
-		clientID:  clientID,
-		groupID:   groupID,
-		writeChan: make(chan *writeRequest, 1000), // 🆕 Async write queue
-		ctx:       ctx,
-		cancel:    cancel,
-		readChan:  make(chan []byte, 100),
-		errorChan: make(chan error, 1),
-		isClient:  true, // Default to client
+		stream:        stream,
+		conn:          conn,
+		clientID:      clientID,
+		groupID:       groupID,
+		groupPassword: groupPassword,
+		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		ctx:           ctx,
+		cancel:        cancel,
+		readChan:      make(chan []byte, 100),
+		errorChan:     make(chan error, 1),
+		isClient:      true, // Default to client
 	}
 
 	// 🆕 Start read/write goroutines
@@ -64,20 +66,21 @@ func newQUICConnection(stream quic.Stream, conn quic.Connection, clientID, group
 }
 
 // newQUICServerConnection creates a new server-side QUIC connection
-func newQUICServerConnection(stream quic.Stream, conn quic.Connection, clientID, groupID string) *quicConnection {
+func newQUICServerConnection(stream quic.Stream, conn quic.Connection, clientID, groupID, groupPassword string) *quicConnection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &quicConnection{
-		stream:    stream,
-		conn:      conn,
-		clientID:  clientID,
-		groupID:   groupID,
-		writeChan: make(chan *writeRequest, 1000), // 🆕 Async write queue
-		ctx:       ctx,
-		cancel:    cancel,
-		readChan:  make(chan []byte, 100),
-		errorChan: make(chan error, 1),
-		isClient:  false, // Server connection
+		stream:        stream,
+		conn:          conn,
+		clientID:      clientID,
+		groupID:       groupID,
+		groupPassword: groupPassword,
+		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		ctx:           ctx,
+		cancel:        cancel,
+		readChan:      make(chan []byte, 100),
+		errorChan:     make(chan error, 1),
+		isClient:      false, // Server connection
 	}
 
 	// 🆕 Start read/write goroutines
@@ -93,8 +96,12 @@ func (c *quicConnection) writeLoop() {
 		// Process requests already in the queue first
 		for {
 			select {
-			case req := <-c.writeChan:
-				if req.errChan != nil {
+			case req, ok := <-c.writeChan:
+				if !ok {
+					// Channel is closed, exit
+					return
+				}
+				if req != nil && req.errChan != nil {
 					select {
 					case req.errChan <- fmt.Errorf("connection closed"):
 						// Successfully sent error
@@ -279,6 +286,11 @@ func (c *quicConnection) GetGroupID() string {
 	return c.groupID
 }
 
+// GetPassword gets password - for upper layer code to extract client information
+func (c *quicConnection) GetPassword() string {
+	return c.groupPassword
+}
+
 // receiveLoop handles incoming messages
 func (c *quicConnection) receiveLoop() {
 	defer func() {
@@ -296,6 +308,7 @@ func (c *quicConnection) receiveLoop() {
 				if err == io.EOF || isQUICError(err) {
 					return
 				}
+				logger.Error("Error reading data", "err", err, "client_id", c.clientID)
 				select {
 				case c.errorChan <- err:
 				case <-c.ctx.Done():

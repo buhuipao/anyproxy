@@ -76,7 +76,7 @@ func (t *quicTransport) dialQUICWithConfig(addr string, config *transport.Client
 	}
 
 	// Create client connection
-	quicConn := newQUICConnection(stream, conn, config.ClientID, config.GroupID)
+	quicConn := newQUICConnection(stream, conn, config.ClientID, config.GroupID, config.GroupPassword)
 
 	logger.Info("QUIC connection established successfully", "client_id", config.ClientID)
 
@@ -88,7 +88,7 @@ func (t *quicTransport) authenticateClient(stream quic.Stream, config *transport
 	logger.Debug("Starting QUIC client authentication", "client_id", config.ClientID, "group_id", config.GroupID)
 
 	// Create authentication message using binary protocol
-	authData := protocol.PackAuthMessage(config.ClientID, config.GroupID, config.Username, config.Password)
+	authData := protocol.PackAuthMessage(config.ClientID, config.GroupID, config.Username, config.Password, config.GroupPassword)
 
 	// Create temporary connection to send authentication message
 	ctx, cancel := context.WithCancel(context.Background())

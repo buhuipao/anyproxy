@@ -2,7 +2,6 @@ package protocols
 
 import (
 	"context"
-	"crypto/sha256"
 	"net"
 	"testing"
 
@@ -12,19 +11,17 @@ import (
 func TestNewTUICProxyWithAuth(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: ":9443",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
@@ -38,29 +35,34 @@ func TestNewTUICProxyWithAuth(t *testing.T) {
 		t.Error("Config not set correctly")
 	}
 
-	// Verify token hash
-	expectedHash := sha256.Sum256([]byte(cfg.Token))
-	if string(tuicProxy.authToken) != string(expectedHash[:]) {
-		t.Error("Auth token hash not computed correctly")
+	// Verify group validator is set
+	if tuicProxy.groupValidator == nil {
+		t.Error("Group validator not set correctly")
+	}
+
+	// Verify TLS cert paths
+	if tuicProxy.tlsCert != "/path/to/cert.pem" {
+		t.Error("TLS cert path not set correctly")
+	}
+	if tuicProxy.tlsKey != "/path/to/key.pem" {
+		t.Error("TLS key path not set correctly")
 	}
 }
 
 func TestTUICProxy_StartStop(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: "127.0.0.1:0", // Use any available port
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
@@ -76,62 +78,56 @@ func TestTUICProxy_StartStop(t *testing.T) {
 	}
 }
 
-func TestTUICProxy_ValidateToken(t *testing.T) {
+func TestTUICProxy_GroupValidation(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: ":9443",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
 
 	tuicProxy := proxy.(*TUICProxy)
 
-	// Test valid token
-	validToken := sha256.Sum256([]byte(cfg.Token))
-	if !tuicProxy.validateToken(validToken[:]) {
-		t.Error("Valid token should be accepted")
+	// Test valid credentials
+	if !tuicProxy.groupValidator("testgroup", "testpass") {
+		t.Error("Valid group credentials should be accepted")
 	}
 
-	// Test invalid token
-	invalidToken := sha256.Sum256([]byte("wrong-token"))
-	if tuicProxy.validateToken(invalidToken[:]) {
-		t.Error("Invalid token should be rejected")
+	// Test invalid group
+	if tuicProxy.groupValidator("wronggroup", "testpass") {
+		t.Error("Invalid group should be rejected")
 	}
 
-	// Test wrong length token
-	if tuicProxy.validateToken([]byte("short")) {
-		t.Error("Wrong length token should be rejected")
+	// Test invalid password
+	if tuicProxy.groupValidator("testgroup", "wrongpass") {
+		t.Error("Invalid password should be rejected")
 	}
 }
 
 func TestTUICProxy_ParseTUICCommand(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: ":9443",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
@@ -198,19 +194,17 @@ func TestTUICProxy_ParseTUICCommand(t *testing.T) {
 func TestTUICProxy_ParseAddress(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: ":9443",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
@@ -286,19 +280,17 @@ func TestTUICProxy_ParseAddress(t *testing.T) {
 func TestTUICProxy_Authentication(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: "127.0.0.1:0",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}
@@ -308,15 +300,22 @@ func TestTUICProxy_Authentication(t *testing.T) {
 	// Create mock client address
 	clientAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
 
-	// Test authentication
-	uuid := make([]byte, TUICUUIDLength)
-	copy(uuid, []byte("test-uuid"))
+	// Test group-based authentication
+	// Create UUID and token data using group credentials
+	groupID := "testgroup"
+	password := "testpass"
 
-	token := sha256.Sum256([]byte(cfg.Token))
+	// UUID is the group_id (padded/truncated to TUICUUIDLength)
+	uuid := make([]byte, TUICUUIDLength)
+	copy(uuid, []byte(groupID))
+
+	// Token is the password (padded/truncated to TUICTokenLength)
+	token := make([]byte, TUICTokenLength)
+	copy(token, []byte(password))
 
 	authData := make([]byte, TUICUUIDLength+TUICTokenLength)
 	copy(authData[:TUICUUIDLength], uuid)
-	copy(authData[TUICUUIDLength:], token[:])
+	copy(authData[TUICUUIDLength:], token)
 
 	cmd := &TUICCommand{
 		Version: TUICVersion,
@@ -341,24 +340,48 @@ func TestTUICProxy_Authentication(t *testing.T) {
 	if string(client.UUID) != string(uuid) {
 		t.Error("Client UUID should match")
 	}
+
+	// Test authentication with invalid credentials
+	invalidGroupID := "wronggroup"
+	invalidUUID := make([]byte, TUICUUIDLength)
+	copy(invalidUUID, []byte(invalidGroupID))
+
+	invalidAuthData := make([]byte, TUICUUIDLength+TUICTokenLength)
+	copy(invalidAuthData[:TUICUUIDLength], invalidUUID)
+	copy(invalidAuthData[TUICUUIDLength:], token) // same password
+
+	invalidCmd := &TUICCommand{
+		Version: TUICVersion,
+		Type:    TUICCmdAuthenticate,
+		Data:    invalidAuthData,
+	}
+
+	// This should not authenticate the client (different client address to avoid conflicts)
+	invalidClientAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:54321")
+	invalidClientID := invalidClientAddr.String()
+	tuicProxy.handleAuthenticate(invalidClientAddr, invalidClientID, invalidCmd)
+
+	// Check that invalid client is not authenticated
+	invalidClient := tuicProxy.getAuthenticatedClient(invalidClientID)
+	if invalidClient != nil {
+		t.Error("Client with invalid credentials should not be authenticated")
+	}
 }
 
 func TestTUICProxy_BuildTUICCommand(t *testing.T) {
 	cfg := &config.TUICConfig{
 		ListenAddr: ":9443",
-		Token:      "test-token",
-		UUID:       "test-uuid",
 	}
 
 	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return net.Dial(network, addr)
 	}
 
-	groupExtractor := func(username string) string {
-		return "default"
+	groupValidator := func(groupID, password string) bool {
+		return groupID == "testgroup" && password == "testpass"
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupExtractor)
+	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
 	if err != nil {
 		t.Fatalf("Failed to create TUIC proxy: %v", err)
 	}

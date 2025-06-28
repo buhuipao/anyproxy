@@ -20,35 +20,34 @@ type SOCKS5Proxy struct {
 	config         *config.SOCKS5Config
 	server         *socks5.Server
 	dialFunc       func(ctx context.Context, network, addr string) (net.Conn, error)
-	groupExtractor func(string) string
+	groupValidator func(string, string) bool // Function to validate group credentials
 	listener       net.Listener
 }
 
 // NewSOCKS5ProxyWithAuth creates a new SOCKS5 proxy with authentication
-func NewSOCKS5ProxyWithAuth(cfg *config.SOCKS5Config, dialFn func(context.Context, string, string) (net.Conn, error), groupExtractor func(string) string) (utils.GatewayProxy, error) {
-	logger.Info("Creating SOCKS5 proxy", "listen_addr", cfg.ListenAddr, "auth_enabled", cfg.AuthUsername != "")
+func NewSOCKS5ProxyWithAuth(cfg *config.SOCKS5Config, dialFn func(context.Context, string, string) (net.Conn, error), groupValidator func(string, string) bool) (utils.GatewayProxy, error) {
+	logger.Info("Creating SOCKS5 proxy", "listen_addr", cfg.ListenAddr, "auth_enabled", "group-based")
 
 	proxy := &SOCKS5Proxy{
 		config:         cfg,
 		dialFunc:       dialFn,
-		groupExtractor: groupExtractor,
+		groupValidator: groupValidator,
 	}
 
 	// Configure authentication methods
 	socks5Auths := []socks5.Authenticator{}
 
-	if cfg.AuthUsername != "" && cfg.AuthPassword != "" {
-		logger.Debug("Configuring SOCKS5 authentication", "auth_username", cfg.AuthUsername)
+	if groupValidator != nil {
+		logger.Debug("Configuring SOCKS5 group-based authentication")
 
 		// Use built-in UserPassAuthenticator with custom credential store
 		credStore := &GroupBasedCredentialStore{
-			ConfigUsername: cfg.AuthUsername,
-			ConfigPassword: cfg.AuthPassword,
+			GroupValidator: groupValidator,
 		}
 		socks5Auths = append(socks5Auths, socks5.UserPassAuthenticator{
 			Credentials: credStore,
 		})
-		logger.Debug("SOCKS5 user/password authentication configured", "auth_username", cfg.AuthUsername)
+		logger.Debug("SOCKS5 group-based authentication configured")
 	} else {
 		logger.Debug("No authentication configured for SOCKS5 proxy")
 	}
@@ -72,16 +71,11 @@ func NewSOCKS5ProxyWithAuth(cfg *config.SOCKS5Config, dialFn func(context.Contex
 		// Extract user information from request's AuthContext
 		if request.AuthContext != nil && request.AuthContext.Payload != nil {
 			if username, exists := request.AuthContext.Payload["username"]; exists {
-				groupID := ""
-				if groupExtractor != nil {
-					groupID = groupExtractor(username)
-					logger.Debug("Extracted group ID from SOCKS5 username", "conn_id", connID, "username", username, "group_id", groupID)
-				}
 				userCtx = &utils.UserContext{
 					Username: username,
-					GroupID:  groupID,
+					GroupID:  username,
 				}
-				logger.Info("SOCKS5 user context extracted from authentication", "conn_id", connID, "username", username, "group_id", groupID, "target_addr", addr)
+				logger.Info("SOCKS5 user context extracted from authentication", "conn_id", connID, "username", username, "group_id", username, "target_addr", addr)
 			} else {
 				logger.Debug("No username found in SOCKS5 authentication context", "conn_id", connID)
 			}
@@ -195,25 +189,21 @@ func (p *SOCKS5Proxy) GetListenAddr() string {
 
 // GroupBasedCredentialStore implements CredentialStore interface with support for group-based usernames
 type GroupBasedCredentialStore struct {
-	ConfigUsername string
-	ConfigPassword string
+	GroupValidator func(string, string) bool
 }
 
 // Valid implements the CredentialStore interface
-// Supports usernames in format "username.group_id" by extracting the base username for authentication
+// Supports usernames in format "username.group_id" by extracting the group for authentication
 func (g *GroupBasedCredentialStore) Valid(user, password, userAddr string) bool {
 	logger.Debug("SOCKS5 authentication attempt", "username", user, "client", userAddr)
 
-	// Extract base username
-	baseUsername := extractBaseUsername(user)
-
-	// Verify credentials
-	isValid := baseUsername == g.ConfigUsername && password == g.ConfigPassword
+	// Verify credentials using group validator
+	isValid := g.GroupValidator != nil && g.GroupValidator(user, password)
 
 	if isValid {
-		logger.Debug("SOCKS5 authentication successful", "username", user, "base_username", baseUsername, "client", userAddr)
+		logger.Debug("SOCKS5 authentication successful", "username", user, "group_id", user, "client", userAddr)
 	} else {
-		logger.Warn("SOCKS5 authentication failed", "username", user, "base_username", baseUsername, "client", userAddr)
+		logger.Warn("SOCKS5 authentication failed", "username", user, "group_id", user, "client", userAddr)
 	}
 
 	return isValid

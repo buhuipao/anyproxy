@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -27,23 +26,37 @@ import (
 
 // Gateway represents the proxy gateway server
 type Gateway struct {
-	config         *config.GatewayConfig
-	transport      transport.Transport  // 🆕 The only new abstraction
-	proxies        []utils.GatewayProxy // Gateway proxy interfaces
-	clientsMu      sync.RWMutex
-	clients        map[string]*ClientConn
-	groups         map[string]map[string]struct{}
-	groupClients   map[string][]string // Fix: Maintain ordered client list for round-robin
-	groupCounters  map[string]int      // Fix: Round-robin counter for each group
-	portForwardMgr *PortForwardManager
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
+	config        *config.GatewayConfig
+	transport     transport.Transport  // 🆕 The only new abstraction
+	proxies       []utils.GatewayProxy // Gateway proxy interfaces
+	clientsMu     sync.RWMutex
+	clients       map[string]*ClientConn
+	groups        map[string]map[string]struct{}
+	groupClients  map[string][]string // Fix: Maintain ordered client list for round-robin
+	groupCounters map[string]int      // Fix: Round-robin counter for each group
+	// Group credential management
+	groupCredentials map[string]string // group_id -> password
+	groupCredMu      sync.RWMutex      // Separate lock for group credentials
+	portForwardMgr   *PortForwardManager
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
 }
 
 // NewGateway creates a new proxy gateway
 func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
-	logger.Info("Creating new gateway", "listen_addr", cfg.Gateway.ListenAddr, "http_proxy_enabled", cfg.Proxy.HTTP.ListenAddr != "", "socks5_proxy_enabled", cfg.Proxy.SOCKS5.ListenAddr != "", "transport_type", transportType, "auth_enabled", cfg.Gateway.AuthUsername != "")
+	// Use transport type from config if available, otherwise use parameter
+	if cfg.Gateway.TransportType != "" {
+		transportType = cfg.Gateway.TransportType
+	}
+
+	// Default to websocket if no transport type specified
+	if transportType == "" {
+		transportType = "websocket"
+		logger.Debug("Using default transport type", "transport_type", transportType)
+	}
+
+	logger.Info("Creating new gateway", "listen_addr", cfg.Gateway.ListenAddr, "http_proxy_enabled", cfg.Gateway.Proxy.HTTP.ListenAddr != "", "socks5_proxy_enabled", cfg.Gateway.Proxy.SOCKS5.ListenAddr != "", "transport_type", transportType, "auth_enabled", cfg.Gateway.AuthUsername != "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -58,15 +71,17 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	}
 
 	gateway := &Gateway{
-		config:         &cfg.Gateway,
-		transport:      transportImpl,
-		clients:        make(map[string]*ClientConn),
-		groups:         make(map[string]map[string]struct{}),
-		groupClients:   make(map[string][]string), // Fix: Initialize ordered client list
-		groupCounters:  make(map[string]int),      // Fix: Initialize round-robin counter
-		portForwardMgr: NewPortForwardManager(),
-		ctx:            ctx,
-		cancel:         cancel,
+		config:           &cfg.Gateway,
+		transport:        transportImpl,
+		clients:          make(map[string]*ClientConn),
+		groups:           make(map[string]map[string]struct{}),
+		groupClients:     make(map[string][]string), // Fix: Initialize ordered client list
+		groupCounters:    make(map[string]int),      // Fix: Initialize round-robin counter
+		groupCredentials: make(map[string]string),
+		groupCredMu:      sync.RWMutex{},
+		portForwardMgr:   NewPortForwardManager(),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	// Initialize default group
@@ -98,48 +113,48 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	var proxies []utils.GatewayProxy
 
 	// Create HTTP proxy
-	if cfg.Proxy.HTTP.ListenAddr != "" {
-		logger.Info("Configuring HTTP proxy", "listen_addr", cfg.Proxy.HTTP.ListenAddr)
-		httpProxy, err := protocols.NewHTTPProxyWithAuth(&cfg.Proxy.HTTP, dialFn, gateway.extractGroupFromUsername)
+	if cfg.Gateway.Proxy.HTTP.ListenAddr != "" {
+		logger.Info("Configuring HTTP proxy", "listen_addr", cfg.Gateway.Proxy.HTTP.ListenAddr)
+		httpProxy, err := protocols.NewHTTPProxyWithAuth(&cfg.Gateway.Proxy.HTTP, dialFn, gateway.validateGroupCredentials)
 		if err != nil {
 			cancel()
-			logger.Error("Failed to create HTTP proxy", "listen_addr", cfg.Proxy.HTTP.ListenAddr, "err", err)
+			logger.Error("Failed to create HTTP proxy", "listen_addr", cfg.Gateway.Proxy.HTTP.ListenAddr, "err", err)
 			return nil, fmt.Errorf("failed to create HTTP proxy: %v", err)
 		}
 		proxies = append(proxies, httpProxy)
-		logger.Info("HTTP proxy configured successfully", "listen_addr", cfg.Proxy.HTTP.ListenAddr)
+		logger.Info("HTTP proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.HTTP.ListenAddr)
 	}
 
 	// Create SOCKS5 proxy
-	if cfg.Proxy.SOCKS5.ListenAddr != "" {
-		logger.Info("Configuring SOCKS5 proxy", "listen_addr", cfg.Proxy.SOCKS5.ListenAddr)
-		socks5Proxy, err := protocols.NewSOCKS5ProxyWithAuth(&cfg.Proxy.SOCKS5, dialFn, gateway.extractGroupFromUsername)
+	if cfg.Gateway.Proxy.SOCKS5.ListenAddr != "" {
+		logger.Info("Configuring SOCKS5 proxy", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
+		socks5Proxy, err := protocols.NewSOCKS5ProxyWithAuth(&cfg.Gateway.Proxy.SOCKS5, dialFn, gateway.validateGroupCredentials)
 		if err != nil {
 			cancel()
-			logger.Error("Failed to create SOCKS5 proxy", "listen_addr", cfg.Proxy.SOCKS5.ListenAddr, "err", err)
+			logger.Error("Failed to create SOCKS5 proxy", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr, "err", err)
 			return nil, fmt.Errorf("failed to create SOCKS5 proxy: %v", err)
 		}
 		proxies = append(proxies, socks5Proxy)
-		logger.Info("SOCKS5 proxy configured successfully", "listen_addr", cfg.Proxy.SOCKS5.ListenAddr)
+		logger.Info("SOCKS5 proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
 	}
 
 	// Create TUIC proxy
-	if cfg.Proxy.TUIC.ListenAddr != "" {
-		logger.Info("Configuring TUIC proxy", "listen_addr", cfg.Proxy.TUIC.ListenAddr, "uuid", cfg.Proxy.TUIC.UUID)
-		tuicProxy, err := protocols.NewTUICProxyWithAuth(&cfg.Proxy.TUIC, dialFn, gateway.extractGroupFromUsername)
+	if cfg.Gateway.Proxy.TUIC.ListenAddr != "" {
+		logger.Info("Configuring TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr)
+		tuicProxy, err := protocols.NewTUICProxyWithAuth(&cfg.Gateway.Proxy.TUIC, dialFn, gateway.validateGroupCredentials, cfg.Gateway.TLSCert, cfg.Gateway.TLSKey)
 		if err != nil {
 			cancel()
-			logger.Error("Failed to create TUIC proxy", "listen_addr", cfg.Proxy.TUIC.ListenAddr, "err", err)
+			logger.Error("Failed to create TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "err", err)
 			return nil, fmt.Errorf("failed to create TUIC proxy: %v", err)
 		}
 		proxies = append(proxies, tuicProxy)
-		logger.Info("TUIC proxy configured successfully", "listen_addr", cfg.Proxy.TUIC.ListenAddr, "uuid", cfg.Proxy.TUIC.UUID)
+		logger.Info("TUIC proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "using_gateway_tls", true)
 	}
 
 	// Ensure at least one proxy is configured
 	if len(proxies) == 0 {
 		cancel()
-		logger.Error("No proxy configured - at least one proxy type must be enabled", "http_addr", cfg.Proxy.HTTP.ListenAddr, "socks5_addr", cfg.Proxy.SOCKS5.ListenAddr, "tuic_addr", cfg.Proxy.TUIC.ListenAddr)
+		logger.Error("No proxy configured - at least one proxy type must be enabled", "http_addr", cfg.Gateway.Proxy.HTTP.ListenAddr, "socks5_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr, "tuic_addr", cfg.Gateway.Proxy.TUIC.ListenAddr)
 		return nil, fmt.Errorf("no proxy configured: please configure at least one of HTTP, SOCKS5, or TUIC proxy")
 	}
 
@@ -147,16 +162,6 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	logger.Info("Gateway created successfully", "proxy_count", len(proxies), "listen_addr", cfg.Gateway.ListenAddr)
 
 	return gateway, nil
-}
-
-// extractGroupFromUsername extracts group ID
-func (g *Gateway) extractGroupFromUsername(username string) string {
-	logger.Debug("extractGroupFromUsername", "username", username)
-	parts := strings.Split(username, ".")
-	if len(parts) >= 2 {
-		return strings.Join(parts[1:], ".")
-	}
-	return ""
 }
 
 // Start starts the gateway
@@ -314,8 +319,23 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 	// Extract client information from connection (now formal part of interface)
 	clientID := conn.GetClientID()
 	groupID := conn.GetGroupID()
+	password := conn.GetPassword()
 
 	logger.Info("Client connected", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
+
+	// Register group credentials
+	if err := g.registerGroupCredentials(groupID, password); err != nil {
+		logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
+		// Send the error message to the client using proper error message type
+		msgHandler := message.NewGatewayExtendedMessageHandler(conn)
+		if writeErr := msgHandler.WriteErrorMessage(err.Error()); writeErr != nil {
+			logger.Error("Failed to send error message to client", "client_id", clientID, "group_id", groupID, "original_error", err, "write_error", writeErr)
+		} else {
+			logger.Debug("Authentication error message sent to client", "client_id", clientID, "group_id", groupID, "error_message", err.Error())
+		}
+		_ = conn.Close()
+		return
+	}
 
 	// Create client connection context
 	ctx, cancel := context.WithCancel(g.ctx)
@@ -452,4 +472,41 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 	}
 
 	return nil, fmt.Errorf("no healthy clients available in group: %s", groupID)
+}
+
+// registerGroupCredentials registers or validates group credentials from a client
+func (g *Gateway) registerGroupCredentials(groupID, password string) error {
+	g.groupCredMu.Lock()
+	defer g.groupCredMu.Unlock()
+
+	if existingPassword, exists := g.groupCredentials[groupID]; exists {
+		if existingPassword != password {
+			return fmt.Errorf("password mismatch for group %s: different clients provided different passwords", groupID)
+		}
+		// Password matches, no need to update
+		return nil
+	}
+
+	// Register new group credentials
+	g.groupCredentials[groupID] = password
+	logger.Info("Registered credentials for new group", "group_id", groupID)
+	return nil
+}
+
+// validateGroupCredentials validates group credentials for proxy authentication
+func (g *Gateway) validateGroupCredentials(groupID, password string) bool {
+	g.groupCredMu.RLock()
+	defer g.groupCredMu.RUnlock()
+
+	expectedPassword, exists := g.groupCredentials[groupID]
+	if !exists {
+		logger.Warn("Authentication failed: unknown group", "group_id", groupID)
+		return false
+	}
+
+	isValid := expectedPassword == password
+	if !isValid {
+		logger.Warn("Authentication failed: invalid password", "group_id", groupID)
+	}
+	return isValid
 }

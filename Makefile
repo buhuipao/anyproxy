@@ -128,7 +128,14 @@ docker-run: docker-run-gateway docker-run-client ## Run with Docker
 docker-run-gateway: docker-build ## Run with Docker
 	@echo "Starting services with Docker..."
 	@docker run -d --name anyproxy-gateway \
-		-p 8080:8080 -p 1080:1080 -p 8443:8443 -p 8090:8090 \
+		--network host \
+		-p 8080:8080 \
+		-p 1080:1080 \
+		-p 9443:9443/udp \
+		-p 8443:8443 \
+		-p 9090:9090 \
+		-p 9091:9091/udp \
+		-p 8090:8090 \
 		-v $(shell pwd)/configs:/app/configs:ro \
 		-v $(shell pwd)/logs:/app/logs \
 		-v $(shell pwd)/certs:/app/certs:ro \

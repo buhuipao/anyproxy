@@ -428,8 +428,8 @@ func (c *Client) createTLSConfig() (*tls.Config, error) {
 	}
 
 	// If TLS certificate is provided, load it
-	if c.config.GatewayTLSCert != "" {
-		certPEM, err := os.ReadFile(c.config.GatewayTLSCert)
+	if c.config.Gateway.TLSCert != "" {
+		certPEM, err := os.ReadFile(c.config.Gateway.TLSCert)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read TLS certificate: %v", err)
 		}
@@ -442,7 +442,7 @@ func (c *Client) createTLSConfig() (*tls.Config, error) {
 		tlsConfig.RootCAs = certPool
 
 		// Extract server name from certificate file path
-		serverName := strings.TrimSuffix(c.config.GatewayAddr, ":443")
+		serverName := strings.TrimSuffix(c.config.Gateway.Addr, ":443")
 		if colonIndex := strings.LastIndex(serverName, ":"); colonIndex != -1 {
 			serverName = serverName[:colonIndex]
 		}

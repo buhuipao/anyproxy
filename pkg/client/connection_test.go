@@ -124,6 +124,10 @@ func (m *mockConnectionForTest) GetGroupID() string {
 	return m.groupID
 }
 
+func (m *mockConnectionForTest) GetPassword() string {
+	return "test-password"
+}
+
 // Helper function to simulate sending a message
 func (m *mockConnectionForTest) simulateMessage(msg map[string]interface{}) {
 	m.mu.Lock()
@@ -166,9 +170,11 @@ func TestConnectionLoop(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID:    "test-client",
-				GroupID:     "test-group",
-				GatewayAddr: "localhost:8080",
+				ClientID: "test-client",
+				GroupID:  "test-group",
+				Gateway: config.ClientGatewayConfig{
+					Addr: "localhost:8080",
+				},
 			}
 
 			client, err := NewClient(config, "test-conn", 0)
@@ -284,10 +290,12 @@ func TestConnect(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID:    "test-client",
-				GroupID:     "test-group",
-				GatewayAddr: "localhost:8080",
-				OpenPorts:   tt.openPorts,
+				ClientID: "test-client",
+				GroupID:  "test-group",
+				Gateway: config.ClientGatewayConfig{
+					Addr: "localhost:8080",
+				},
+				OpenPorts: tt.openPorts,
 			}
 
 			client, err := NewClient(config, "test-connect", 0)
@@ -322,9 +330,11 @@ func TestConnect(t *testing.T) {
 func TestCloseAllConnections(t *testing.T) {
 	// Create client
 	config := &config.ClientConfig{
-		ClientID:    "test-client",
-		GroupID:     "test-group",
-		GatewayAddr: "localhost:8080",
+		ClientID: "test-client",
+		GroupID:  "test-group",
+		Gateway: config.ClientGatewayConfig{
+			Addr: "localhost:8080",
+		},
 	}
 
 	client := &Client{
@@ -461,9 +471,11 @@ func TestHandleConnection(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID:    "test-client",
-				GroupID:     "test-group",
-				GatewayAddr: "localhost:8080",
+				ClientID: "test-client",
+				GroupID:  "test-group",
+				Gateway: config.ClientGatewayConfig{
+					Addr: "localhost:8080",
+				},
 			}
 
 			if tt.forbiddenHost {

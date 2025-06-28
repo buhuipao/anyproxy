@@ -32,10 +32,11 @@ type grpcStream interface {
 
 // grpcConnection unified gRPC connection implementation
 type grpcConnection struct {
-	stream   grpcStream
-	conn     *grpc.ClientConn // Only client connections have this
-	clientID string
-	groupID  string
+	stream        grpcStream
+	conn          *grpc.ClientConn // Only client connections have this
+	clientID      string
+	groupID       string
+	groupPassword string // Client password for group credential management
 	// 🆕 Remove mutex, use async writes instead
 	writeChan chan *writeRequest // 🆕 Async write queue
 	closed    bool
@@ -49,19 +50,20 @@ type grpcConnection struct {
 var _ transport.Connection = (*grpcConnection)(nil)
 
 // newGRPCConnection creates a client gRPC connection
-func newGRPCConnection(stream TransportService_BiStreamClient, conn *grpc.ClientConn, clientID, groupID string) *grpcConnection {
+func newGRPCConnection(stream TransportService_BiStreamClient, conn *grpc.ClientConn, clientID, groupID, groupPassword string) *grpcConnection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &grpcConnection{
-		stream:    stream,
-		conn:      conn,
-		clientID:  clientID,
-		groupID:   groupID,
-		writeChan: make(chan *writeRequest, 1000), // 🆕 Async write queue
-		ctx:       ctx,
-		cancel:    cancel,
-		readChan:  make(chan []byte, 100),
-		errorChan: make(chan error, 1),
+		stream:        stream,
+		conn:          conn,
+		clientID:      clientID,
+		groupID:       groupID,
+		groupPassword: groupPassword,
+		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		ctx:           ctx,
+		cancel:        cancel,
+		readChan:      make(chan []byte, 100),
+		errorChan:     make(chan error, 1),
 	}
 
 	// 🆕 Start read/write goroutines
@@ -71,19 +73,20 @@ func newGRPCConnection(stream TransportService_BiStreamClient, conn *grpc.Client
 }
 
 // newGRPCServerConnection creates a server gRPC connection
-func newGRPCServerConnection(stream TransportService_BiStreamServer, clientID, groupID string) *grpcConnection {
+func newGRPCServerConnection(stream TransportService_BiStreamServer, clientID, groupID, groupPassword string) *grpcConnection {
 	ctx, cancel := context.WithCancel(stream.Context())
 
 	c := &grpcConnection{
-		stream:    stream,
-		conn:      nil, // Server connections don't have client connections
-		clientID:  clientID,
-		groupID:   groupID,
-		writeChan: make(chan *writeRequest, 1000), // 🆕 Async write queue
-		ctx:       ctx,
-		cancel:    cancel,
-		readChan:  make(chan []byte, 100),
-		errorChan: make(chan error, 1),
+		stream:        stream,
+		conn:          nil, // Server connections don't have client connections
+		clientID:      clientID,
+		groupID:       groupID,
+		groupPassword: groupPassword,
+		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		ctx:           ctx,
+		cancel:        cancel,
+		readChan:      make(chan []byte, 100),
+		errorChan:     make(chan error, 1),
 	}
 
 	// 🆕 Start read/write goroutines
@@ -236,6 +239,11 @@ func (c *grpcConnection) GetClientID() string {
 // GetGroupID gets group ID - for upper layer code to extract client information
 func (c *grpcConnection) GetGroupID() string {
 	return c.groupID
+}
+
+// GetPassword gets password - for upper layer code to extract client password
+func (c *grpcConnection) GetPassword() string {
+	return c.groupPassword
 }
 
 // receiveLoop handles receiving messages

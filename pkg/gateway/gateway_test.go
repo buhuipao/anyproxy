@@ -80,6 +80,7 @@ func (m *mockTransport) Name() string {
 type mockConnection struct {
 	clientID string
 	groupID  string
+	password string
 	closed   bool
 	mu       sync.Mutex
 	readErr  error
@@ -140,6 +141,10 @@ func (m *mockConnection) GetGroupID() string {
 	return m.groupID
 }
 
+func (m *mockConnection) GetPassword() string {
+	return m.password
+}
+
 func (m *mockConnection) SetDeadline(t time.Time) error {
 	return nil
 }
@@ -183,10 +188,10 @@ func TestNewGateway(t *testing.T) {
 			config: &config.Config{
 				Gateway: config.GatewayConfig{
 					ListenAddr: ":8080",
-				},
-				Proxy: config.ProxyConfig{
-					HTTP: config.HTTPConfig{
-						ListenAddr: ":8081",
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8081",
+						},
 					},
 				},
 			},
@@ -198,10 +203,10 @@ func TestNewGateway(t *testing.T) {
 			config: &config.Config{
 				Gateway: config.GatewayConfig{
 					ListenAddr: ":8080",
-				},
-				Proxy: config.ProxyConfig{
-					SOCKS5: config.SOCKS5Config{
-						ListenAddr: ":8082",
+					Proxy: config.ProxyConfig{
+						SOCKS5: config.SOCKS5Config{
+							ListenAddr: ":8082",
+						},
 					},
 				},
 			},
@@ -213,13 +218,13 @@ func TestNewGateway(t *testing.T) {
 			config: &config.Config{
 				Gateway: config.GatewayConfig{
 					ListenAddr: ":8080",
-				},
-				Proxy: config.ProxyConfig{
-					HTTP: config.HTTPConfig{
-						ListenAddr: ":8081",
-					},
-					SOCKS5: config.SOCKS5Config{
-						ListenAddr: ":8082",
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8081",
+						},
+						SOCKS5: config.SOCKS5Config{
+							ListenAddr: ":8082",
+						},
 					},
 				},
 			},
@@ -231,8 +236,8 @@ func TestNewGateway(t *testing.T) {
 			config: &config.Config{
 				Gateway: config.GatewayConfig{
 					ListenAddr: ":8080",
+					Proxy:      config.ProxyConfig{},
 				},
-				Proxy: config.ProxyConfig{},
 			},
 			transportType: "mock",
 			expectError:   true,
@@ -243,10 +248,10 @@ func TestNewGateway(t *testing.T) {
 			config: &config.Config{
 				Gateway: config.GatewayConfig{
 					ListenAddr: ":8080",
-				},
-				Proxy: config.ProxyConfig{
-					HTTP: config.HTTPConfig{
-						ListenAddr: ":8081",
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8081",
+						},
 					},
 				},
 			},
@@ -309,46 +314,6 @@ func TestNewGateway(t *testing.T) {
 					// Cleanup
 					gw.cancel()
 				}
-			}
-		})
-	}
-}
-
-func TestGateway_ExtractGroupFromUsername(t *testing.T) {
-	gw := &Gateway{}
-
-	tests := []struct {
-		name     string
-		username string
-		expected string
-	}{
-		{
-			name:     "username with group",
-			username: "user.group1",
-			expected: "group1",
-		},
-		{
-			name:     "username with multiple dots",
-			username: "user.group1.subgroup",
-			expected: "group1.subgroup",
-		},
-		{
-			name:     "username without group",
-			username: "user",
-			expected: "",
-		},
-		{
-			name:     "empty username",
-			username: "",
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := gw.extractGroupFromUsername(tt.username)
-			if result != tt.expected {
-				t.Errorf("extractGroupFromUsername(%q) = %q, want %q", tt.username, result, tt.expected)
 			}
 		})
 	}
@@ -526,10 +491,10 @@ func TestGateway_StartStop(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: config.GatewayConfig{
 			ListenAddr: ":8080",
-		},
-		Proxy: config.ProxyConfig{
-			HTTP: config.HTTPConfig{
-				ListenAddr: ":8081",
+			Proxy: config.ProxyConfig{
+				HTTP: config.HTTPConfig{
+					ListenAddr: ":8081",
+				},
 			},
 		},
 	}
@@ -609,13 +574,14 @@ func TestGateway_HandleConnection(t *testing.T) {
 	defer cancel()
 
 	gw := &Gateway{
-		clients:        make(map[string]*ClientConn),
-		groups:         make(map[string]map[string]struct{}),
-		groupClients:   make(map[string][]string),
-		groupCounters:  make(map[string]int),
-		portForwardMgr: NewPortForwardManager(),
-		ctx:            ctx,
-		cancel:         cancel,
+		clients:          make(map[string]*ClientConn),
+		groups:           make(map[string]map[string]struct{}),
+		groupClients:     make(map[string][]string),
+		groupCounters:    make(map[string]int),
+		groupCredentials: make(map[string]string),
+		portForwardMgr:   NewPortForwardManager(),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	// Initialize default group
@@ -707,4 +673,238 @@ func containsSlice(slice []string, str string) bool {
 		}
 	}
 	return false
+}
+
+func TestGateway_RegisterGroupCredentials(t *testing.T) {
+	// Create minimal config for testing
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			ListenAddr:   ":8443",
+			AuthUsername: "test",
+			AuthPassword: "test",
+			Proxy: config.ProxyConfig{
+				HTTP: config.HTTPConfig{
+					ListenAddr: ":8080",
+				},
+			},
+		},
+	}
+
+	gateway, err := NewGateway(cfg, "grpc")
+	if err != nil {
+		t.Fatalf("Failed to create gateway: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		groupID     string
+		password    string
+		expectError bool
+	}{
+		{
+			name:        "register new group",
+			groupID:     "group1",
+			password:    "pass1",
+			expectError: false,
+		},
+		{
+			name:        "register same group with same password",
+			groupID:     "group1",
+			password:    "pass1",
+			expectError: false,
+		},
+		{
+			name:        "register same group with different password",
+			groupID:     "group1",
+			password:    "pass2",
+			expectError: true,
+		},
+		{
+			name:        "register different group",
+			groupID:     "group2",
+			password:    "pass2",
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := gateway.registerGroupCredentials(tt.groupID, tt.password)
+			if (err != nil) != tt.expectError {
+				t.Errorf("registerGroupCredentials() error = %v, expectError %v", err, tt.expectError)
+			}
+		})
+	}
+}
+
+func TestGateway_ValidateGroupCredentials(t *testing.T) {
+	// Create minimal config for testing
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			ListenAddr:   ":8443",
+			AuthUsername: "test",
+			AuthPassword: "test",
+			Proxy: config.ProxyConfig{
+				HTTP: config.HTTPConfig{
+					ListenAddr: ":8080",
+				},
+			},
+		},
+	}
+
+	gateway, err := NewGateway(cfg, "grpc")
+	if err != nil {
+		t.Fatalf("Failed to create gateway: %v", err)
+	}
+
+	// Register some test groups
+	gateway.registerGroupCredentials("testgroup", "testpass")
+	gateway.registerGroupCredentials("anothergroup", "anotherpass")
+
+	tests := []struct {
+		name     string
+		groupID  string
+		password string
+		expected bool
+	}{
+		{
+			name:     "valid credentials",
+			groupID:  "testgroup",
+			password: "testpass",
+			expected: true,
+		},
+		{
+			name:     "invalid password",
+			groupID:  "testgroup",
+			password: "wrongpass",
+			expected: false,
+		},
+		{
+			name:     "unknown group",
+			groupID:  "unknowngroup",
+			password: "anypass",
+			expected: false,
+		},
+		{
+			name:     "another valid group",
+			groupID:  "anothergroup",
+			password: "anotherpass",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := gateway.validateGroupCredentials(tt.groupID, tt.password)
+			if result != tt.expected {
+				t.Errorf("validateGroupCredentials() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGateway_NewGatewayCreation(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        *config.Config
+		transportType string
+		expectError   bool
+	}{
+		{
+			name: "valid gateway with HTTP proxy",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8080",
+						},
+					},
+				},
+			},
+			transportType: "grpc",
+			expectError:   false,
+		},
+		{
+			name: "valid gateway with SOCKS5 proxy",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Proxy: config.ProxyConfig{
+						SOCKS5: config.SOCKS5Config{
+							ListenAddr: ":1080",
+						},
+					},
+				},
+			},
+			transportType: "grpc",
+			expectError:   false,
+		},
+		{
+			name: "valid gateway with TUIC proxy",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					TLSCert:      "/path/to/cert.pem",
+					TLSKey:       "/path/to/key.pem",
+					Proxy: config.ProxyConfig{
+						TUIC: config.TUICConfig{
+							ListenAddr: ":9443",
+						},
+					},
+				},
+			},
+			transportType: "grpc",
+			expectError:   false,
+		},
+		{
+			name: "no proxy configured",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Proxy:        config.ProxyConfig{},
+				},
+			},
+			transportType: "grpc",
+			expectError:   true,
+		},
+		{
+			name: "invalid transport type",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8080",
+						},
+					},
+				},
+			},
+			transportType: "invalid",
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gateway, err := NewGateway(tt.config, tt.transportType)
+			if (err != nil) != tt.expectError {
+				t.Errorf("NewGateway() error = %v, expectError %v", err, tt.expectError)
+				return
+			}
+			if !tt.expectError && gateway == nil {
+				t.Error("NewGateway() returned nil gateway without error")
+			}
+		})
+	}
 }

@@ -195,6 +195,7 @@ func (s *transportServer) BiStream(stream TransportService_BiStreamServer) error
 	// Extract client information
 	clientID := getMetadataValue(md, "client-id")
 	groupID := getMetadataValue(md, "group-id")
+	groupPassword := getMetadataValue(md, "group-password")
 	username := getMetadataValue(md, "username")
 	password := getMetadataValue(md, "password")
 
@@ -217,7 +218,7 @@ func (s *transportServer) BiStream(stream TransportService_BiStreamServer) error
 	logger.Info("Client connected via gRPC", "client_id", clientID, "group_id", groupID)
 
 	// Create connection wrapper
-	conn := newGRPCServerConnection(stream, clientID, groupID)
+	conn := newGRPCServerConnection(stream, clientID, groupID, groupPassword)
 
 	// Call handler, let any issues surface
 	// If bugs cause panic, fix the bug rather than hide it

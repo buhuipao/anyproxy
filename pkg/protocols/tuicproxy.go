@@ -2,14 +2,13 @@
 package protocols
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
 	"time"
-
-	"crypto/sha256"
 
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
@@ -44,14 +43,15 @@ type TUICProxy struct {
 	config         *config.TUICConfig
 	listener       net.PacketConn
 	dialFunc       func(ctx context.Context, network, addr string) (net.Conn, error)
-	groupExtractor func(string) string
+	groupValidator func(string, string) bool // Function to validate group credentials
+	tlsCert        string                    // Gateway TLS certificate path
+	tlsKey         string                    // Gateway TLS key path
 	running        bool
 	mu             sync.Mutex
 	stopCh         chan struct{}
 	wg             sync.WaitGroup
 
-	// Authentication
-	authToken            []byte
+	// Authentication - using group-based validation
 	authenticatedClients map[string]*TUICClient
 	clientsMu            sync.RWMutex
 
@@ -121,25 +121,17 @@ type TUICPacketData struct {
 }
 
 // NewTUICProxyWithAuth creates a new TUIC proxy with authentication
-func NewTUICProxyWithAuth(cfg *config.TUICConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupExtractor func(string) string) (utils.GatewayProxy, error) {
-	if cfg.Token == "" {
-		return nil, fmt.Errorf("TUIC token is required")
-	}
-	if cfg.UUID == "" {
-		return nil, fmt.Errorf("TUIC UUID is required")
-	}
+func NewTUICProxyWithAuth(cfg *config.TUICConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupValidator func(string, string) bool, tlsCert, tlsKey string) (utils.GatewayProxy, error) {
 	if cfg.ListenAddr == "" {
 		return nil, fmt.Errorf("TUIC listen address is required")
 	}
 
-	// Hash the token for authentication
-	tokenHash := sha256.Sum256([]byte(cfg.Token))
-
 	proxy := &TUICProxy{
 		config:               cfg,
 		dialFunc:             dialFn,
-		groupExtractor:       groupExtractor,
-		authToken:            tokenHash[:],
+		groupValidator:       groupValidator, // Use group validator instead of static token
+		tlsCert:              tlsCert,
+		tlsKey:               tlsKey,
 		authenticatedClients: make(map[string]*TUICClient),
 		udpSessions:          make(map[string]map[uint16]*TUICUDPSession),
 		packetAssemblers:     make(map[string]map[uint16]*TUICPacketAssembler),
@@ -198,6 +190,13 @@ func (p *TUICProxy) Stop() error {
 	close(p.stopCh)
 
 	if p.listener != nil {
+		// Set read deadline to immediately unblock any pending ReadFrom calls
+		if udpConn, ok := p.listener.(*net.UDPConn); ok {
+			if err := udpConn.SetReadDeadline(time.Now()); err != nil {
+				logger.Error("Failed to set read deadline during shutdown", "err", err)
+			}
+		}
+
 		if err := p.listener.Close(); err != nil {
 			logger.Error("Failed to close listener", "err", err)
 		}
@@ -208,6 +207,10 @@ func (p *TUICProxy) Stop() error {
 	for _, clientSessions := range p.udpSessions {
 		for _, session := range clientSessions {
 			if session.TargetConn != nil {
+				// Set read deadline to immediately unblock any pending ReadFrom calls
+				if err := session.TargetConn.SetReadDeadline(time.Now()); err != nil {
+					logger.Error("Failed to set read deadline during UDP session shutdown", "err", err)
+				}
 				if err := session.TargetConn.Close(); err != nil {
 					logger.Error("Failed to close UDP session", "err", err)
 				}
@@ -216,6 +219,7 @@ func (p *TUICProxy) Stop() error {
 	}
 	p.udpSessionsMu.Unlock()
 
+	logger.Debug("Waiting for TUIC proxy goroutines to finish")
 	p.wg.Wait()
 
 	logger.Info("TUIC proxy stopped")
@@ -239,17 +243,30 @@ func (p *TUICProxy) handlePackets() {
 		case <-p.stopCh:
 			return
 		default:
-			n, clientAddr, err := p.listener.ReadFrom(buffer)
-			if err != nil {
-				if p.isRunning() {
-					logger.Error("Failed to read UDP packet", "err", err)
-				}
+		}
+
+		// Set a read deadline to avoid indefinite blocking
+		if udpConn, ok := p.listener.(*net.UDPConn); ok {
+			if err := udpConn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+				logger.Error("Failed to set read deadline", "err", err)
 				return
 			}
+		}
 
-			if n > 0 {
-				p.handleTUICPacket(clientAddr, buffer[:n])
+		n, clientAddr, err := p.listener.ReadFrom(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Timeout is expected, continue the loop to check stopCh
+				continue
 			}
+			if p.isRunning() {
+				logger.Error("Failed to read UDP packet", "err", err)
+			}
+			return
+		}
+
+		if n > 0 {
+			p.handleTUICPacket(clientAddr, buffer[:n])
 		}
 	}
 }
@@ -312,7 +329,7 @@ func (p *TUICProxy) parseTUICCommand(data []byte) (*TUICCommand, error) {
 func (p *TUICProxy) handleAuthenticate(clientAddr net.Addr, clientID string, cmd *TUICCommand) {
 	logger.Debug("Handling TUIC Authenticate", "client", clientAddr)
 
-	// Parse authenticate data
+	// Parse authenticate data - UUID (group_id) + Token (password)
 	if len(cmd.Data) < TUICUUIDLength+TUICTokenLength {
 		logger.Error("Authenticate data too short", "client", clientAddr, "expected", TUICUUIDLength+TUICTokenLength, "actual", len(cmd.Data))
 		return
@@ -321,9 +338,14 @@ func (p *TUICProxy) handleAuthenticate(clientAddr net.Addr, clientID string, cmd
 	uuid := cmd.Data[:TUICUUIDLength]
 	token := cmd.Data[TUICUUIDLength : TUICUUIDLength+TUICTokenLength]
 
-	// Validate token
-	if !p.validateToken(token) {
-		logger.Error("Authentication failed: invalid token", "client", clientAddr, "uuid", fmt.Sprintf("%x", uuid[:8]))
+	// Convert UUID bytes to group_id string and token bytes to password string
+	// Trim null bytes to handle variable-length strings in fixed-length byte arrays
+	groupID := string(bytes.TrimRight(uuid, "\x00"))
+	password := string(bytes.TrimRight(token, "\x00"))
+
+	// Validate credentials using group validator
+	if p.groupValidator != nil && !p.groupValidator(groupID, password) {
+		logger.Error("Authentication failed: invalid group credentials", "client", clientAddr, "group_id", groupID)
 		return
 	}
 
@@ -340,20 +362,7 @@ func (p *TUICProxy) handleAuthenticate(clientAddr net.Addr, clientID string, cmd
 	p.authenticatedClients[clientID] = client
 	p.clientsMu.Unlock()
 
-	logger.Info("Client authenticated successfully", "client", clientAddr, "uuid", fmt.Sprintf("%x", uuid[:8]))
-}
-
-// validateToken validates the authentication token
-func (p *TUICProxy) validateToken(token []byte) bool {
-	if len(token) != len(p.authToken) {
-		return false
-	}
-	for i, b := range token {
-		if b != p.authToken[i] {
-			return false
-		}
-	}
-	return true
+	logger.Info("Client authenticated successfully", "client", clientAddr, "group_id", groupID)
 }
 
 // handleConnect handles Connect command
@@ -693,6 +702,7 @@ func (p *TUICProxy) getOrCreateUDPSession(clientID string, assocID uint16, clien
 		logger.Info("UDP session created", "client", client.RemoteAddr, "assoc_id", assocID)
 
 		// Start relay back to client
+		p.wg.Add(1)
 		go p.relayUDPBack(clientID, session)
 	}
 
@@ -701,6 +711,7 @@ func (p *TUICProxy) getOrCreateUDPSession(clientID string, assocID uint16, clien
 
 // relayUDPBack relays UDP packets back to client
 func (p *TUICProxy) relayUDPBack(clientID string, session *TUICUDPSession) {
+	defer p.wg.Done()
 	defer func() {
 		// Cleanup session
 		p.udpSessionsMu.Lock()
@@ -722,27 +733,31 @@ func (p *TUICProxy) relayUDPBack(clientID string, session *TUICUDPSession) {
 		case <-p.stopCh:
 			return
 		default:
-			if err := session.TargetConn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-				logger.Error("Failed to set read deadline", "err", err)
-				return
-			}
-			n, srcAddr, err := session.TargetConn.ReadFrom(buffer)
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				logger.Debug("UDP relay read error", "assoc_id", session.AssocID, "err", err)
-				return
-			}
+		}
 
-			if n > 0 {
-				// Send packet back to client
-				p.sendUDPPacketToClient(session, srcAddr, buffer[:n])
+		// Use shorter timeout to be more responsive to shutdown signals
+		if err := session.TargetConn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+			logger.Error("Failed to set read deadline", "err", err)
+			return
+		}
 
-				session.mu.Lock()
-				session.LastUsed = time.Now()
-				session.mu.Unlock()
+		n, srcAddr, err := session.TargetConn.ReadFrom(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Check stop signal again after timeout
+				continue
 			}
+			logger.Debug("UDP relay read error", "assoc_id", session.AssocID, "err", err)
+			return
+		}
+
+		if n > 0 {
+			// Send packet back to client
+			p.sendUDPPacketToClient(session, srcAddr, buffer[:n])
+
+			session.mu.Lock()
+			session.LastUsed = time.Now()
+			session.mu.Unlock()
 		}
 	}
 }

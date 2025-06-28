@@ -10,6 +10,7 @@ const (
 	MsgTypeClose           = "close"
 	MsgTypePortForwardReq  = "port_forward_request"
 	MsgTypePortForwardResp = "port_forward_response"
+	MsgTypeError           = "error"
 )
 
 // Protocol constants
@@ -29,7 +30,7 @@ const (
 	TransportTypeGRPC      = "grpc"
 	TransportTypeWebSocket = "websocket"
 	TransportTypeQUIC      = "quic"
-	TransportTypeDefault   = TransportTypeWebSocket
+	TransportTypeDefault   = TransportTypeGRPC
 )
 
 // Timeout configuration

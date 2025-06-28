@@ -289,8 +289,10 @@ kZuMN5z5SlANRxCDg1oXhRfO3P8Yq7EBRRF8CZMixMFyP+9apYqtH6qAg3w=
 		t.Run(tt.name, func(t *testing.T) {
 			client := &Client{
 				config: &config.ClientConfig{
-					GatewayAddr:    tt.gatewayAddr,
-					GatewayTLSCert: tt.tlsCertPath,
+					Gateway: config.ClientGatewayConfig{
+						Addr:    tt.gatewayAddr,
+						TLSCert: tt.tlsCertPath,
+					},
 				},
 			}
 

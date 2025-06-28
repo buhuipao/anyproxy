@@ -56,6 +56,13 @@ func (c *Client) handleMessages() {
 			// Handle port forwarding response directly
 			logger.Debug("Received port forwarding response", "client_id", c.getClientID())
 			c.handlePortForwardResponse(msg)
+		case protocol.MsgTypeError:
+			// Handle gateway-level errors (e.g., authentication failures)
+			if errorMsg, ok := msg["error_message"].(string); ok {
+				logger.Error("Gateway error received", "client_id", c.getClientID(), "error_message", errorMsg, "message_count", messageCount)
+			} else {
+				logger.Error("Gateway error received with invalid format", "client_id", c.getClientID(), "message_count", messageCount, "message_fields", utils.GetMessageFields(msg))
+			}
 		default:
 			logger.Warn("Unknown message type from gateway", "client_id", c.getClientID(), "message_type", msgType, "message_count", messageCount)
 		}

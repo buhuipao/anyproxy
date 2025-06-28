@@ -24,6 +24,7 @@ const (
 	// Authentication message types (0x06 - 0x0F)
 	BinaryMsgTypeAuth         byte = 0x06 // Authentication request
 	BinaryMsgTypeAuthResponse byte = 0x07 // Authentication response
+	BinaryMsgTypeError        byte = 0x08 // Error message
 
 	// Data message types (0x10 - 0x1F)
 	BinaryMsgTypeData byte = 0x10 // Data transfer
@@ -560,17 +561,18 @@ func UnpackPortForwardResponseMessage(data []byte) (success bool, errorMsg strin
 }
 
 // --- Authentication request messages ---
-// Format: [version:1][type:1][clientID_length:2][clientID:N][groupID_length:2][groupID:N][username_length:2][username:N][password_length:2][password:N]
+// Format: [version:1][type:1][clientID_length:2][clientID:N][groupID_length:2][groupID:N][username_length:2][username:N][password_length:2][password:N][groupPassword_length:2][groupPassword:N]
 
 // PackAuthMessage packs authentication request
-func PackAuthMessage(clientID, groupID, username, password string) []byte {
+func PackAuthMessage(clientID, groupID, username, password, groupPassword string) []byte {
 	clientIDBytes := []byte(clientID)
 	groupIDBytes := []byte(groupID)
 	usernameBytes := []byte(username)
 	passwordBytes := []byte(password)
+	groupPasswordBytes := []byte(groupPassword)
 
 	// Calculate total length
-	totalLen := 2 + len(clientIDBytes) + 2 + len(groupIDBytes) + 2 + len(usernameBytes) + 2 + len(passwordBytes)
+	totalLen := 2 + len(clientIDBytes) + 2 + len(groupIDBytes) + 2 + len(usernameBytes) + 2 + len(passwordBytes) + 2 + len(groupPasswordBytes)
 	payload := make([]byte, totalLen)
 
 	offset := 0
@@ -605,14 +607,22 @@ func PackAuthMessage(clientID, groupID, username, password string) []byte {
 
 	// password content
 	copy(payload[offset:], passwordBytes)
+	offset += len(passwordBytes)
+
+	// groupPassword length (2 bytes)
+	binary.BigEndian.PutUint16(payload[offset:], uint16(len(groupPasswordBytes))) //nolint:gosec // groupPassword is always short
+	offset += 2
+
+	// groupPassword content
+	copy(payload[offset:], groupPasswordBytes)
 
 	return PackBinaryMessage(BinaryMsgTypeAuth, payload)
 }
 
 // UnpackAuthMessage unpacks authentication request
-func UnpackAuthMessage(data []byte) (clientID, groupID, username, password string, err error) {
-	if len(data) < 8 {
-		return "", "", "", "", fmt.Errorf("auth message too short: %d bytes", len(data))
+func UnpackAuthMessage(data []byte) (clientID, groupID, username, password, groupPassword string, err error) {
+	if len(data) < 10 {
+		return "", "", "", "", "", fmt.Errorf("auth message too short: %d bytes", len(data))
 	}
 
 	offset := 0
@@ -621,47 +631,59 @@ func UnpackAuthMessage(data []byte) (clientID, groupID, username, password strin
 	clientIDLen := binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	if offset+int(clientIDLen) > len(data) {
-		return "", "", "", "", fmt.Errorf("invalid clientID length")
+		return "", "", "", "", "", fmt.Errorf("invalid clientID length")
 	}
 	clientID = string(data[offset : offset+int(clientIDLen)])
 	offset += int(clientIDLen)
 
 	// Extract groupID
 	if offset+2 > len(data) {
-		return "", "", "", "", fmt.Errorf("missing groupID length")
+		return "", "", "", "", "", fmt.Errorf("missing groupID length")
 	}
 	groupIDLen := binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	if offset+int(groupIDLen) > len(data) {
-		return "", "", "", "", fmt.Errorf("invalid groupID length")
+		return "", "", "", "", "", fmt.Errorf("invalid groupID length")
 	}
 	groupID = string(data[offset : offset+int(groupIDLen)])
 	offset += int(groupIDLen)
 
 	// Extract username
 	if offset+2 > len(data) {
-		return "", "", "", "", fmt.Errorf("missing username length")
+		return "", "", "", "", "", fmt.Errorf("missing username length")
 	}
 	usernameLen := binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	if offset+int(usernameLen) > len(data) {
-		return "", "", "", "", fmt.Errorf("invalid username length")
+		return "", "", "", "", "", fmt.Errorf("invalid username length")
 	}
 	username = string(data[offset : offset+int(usernameLen)])
 	offset += int(usernameLen)
 
 	// Extract password
 	if offset+2 > len(data) {
-		return "", "", "", "", fmt.Errorf("missing password length")
+		return "", "", "", "", "", fmt.Errorf("missing password length")
 	}
 	passwordLen := binary.BigEndian.Uint16(data[offset:])
 	offset += 2
 	if offset+int(passwordLen) > len(data) {
-		return "", "", "", "", fmt.Errorf("invalid password length")
+		return "", "", "", "", "", fmt.Errorf("invalid password length")
 	}
 	password = string(data[offset : offset+int(passwordLen)])
+	offset += int(passwordLen)
 
-	return clientID, groupID, username, password, nil
+	// Extract groupPassword
+	if offset+2 > len(data) {
+		return "", "", "", "", "", fmt.Errorf("missing groupPassword length")
+	}
+	groupPasswordLen := binary.BigEndian.Uint16(data[offset:])
+	offset += 2
+	if offset+int(groupPasswordLen) > len(data) {
+		return "", "", "", "", "", fmt.Errorf("invalid groupPassword length")
+	}
+	groupPassword = string(data[offset : offset+int(groupPasswordLen)])
+
+	return clientID, groupID, username, password, groupPassword, nil
 }
 
 // --- Authentication response messages ---
@@ -725,4 +747,46 @@ func UnpackAuthResponseMessage(data []byte) (status, reason string, err error) {
 	reason = string(data[offset : offset+int(reasonLen)])
 
 	return status, reason, nil
+}
+
+// --- Error messages ---
+// Format: [version:1][type:1][error_message_length:2][error_message:N]
+
+// PackErrorMessage packs error message
+func PackErrorMessage(errorMsg string) []byte {
+	errorBytes := []byte(errorMsg)
+
+	// Calculate total length
+	totalLen := 2 + len(errorBytes)
+	payload := make([]byte, totalLen)
+
+	offset := 0
+
+	// error message length (2 bytes)
+	binary.BigEndian.PutUint16(payload[offset:], uint16(len(errorBytes))) //nolint:gosec // error msg is always short
+	offset += 2
+
+	// error message content
+	copy(payload[offset:], errorBytes)
+
+	return PackBinaryMessage(BinaryMsgTypeError, payload)
+}
+
+// UnpackErrorMessage unpacks error message
+func UnpackErrorMessage(data []byte) (errorMsg string, err error) {
+	if len(data) < 2 {
+		return "", fmt.Errorf("error message too short: %d bytes", len(data))
+	}
+
+	offset := 0
+
+	// Extract error message
+	errorLen := binary.BigEndian.Uint16(data[offset:])
+	offset += 2
+	if offset+int(errorLen) > len(data) {
+		return "", fmt.Errorf("invalid error message length")
+	}
+	errorMsg = string(data[offset : offset+int(errorLen)])
+
+	return errorMsg, nil
 }

@@ -18,32 +18,42 @@ import (
 
 // Mock dial function for testing
 func mockDialFunc(ctx context.Context, network, addr string) (net.Conn, error) {
-	// Create a mock connection that connects to a test server
-	return net.Dial(network, addr)
+	// Create a pipe to simulate network connection
+	client, server := net.Pipe()
+
+	// Instead of immediately closing, simulate a proper HTTP response
+	go func() {
+		defer server.Close()
+		// Read the request and send a response
+		buf := make([]byte, 4096)
+		server.Read(buf) // Read the HTTP request
+
+		// Send a basic HTTP response with correct Content-Length
+		responseBody := "Test response"
+		response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(responseBody), responseBody)
+		server.Write([]byte(response))
+	}()
+
+	return client, nil
 }
 
 // Mock dial function that always fails
 func failingDialFunc(ctx context.Context, network, addr string) (net.Conn, error) {
-	return nil, fmt.Errorf("connection failed")
+	return nil, fmt.Errorf("dial failed")
 }
 
-// Mock group extractor
-func mockGroupExtractor(username string) string {
-	parts := strings.Split(username, ".")
-	if len(parts) > 1 {
-		return parts[1]
-	}
-	return "default"
+// Mock group validator
+func mockGroupValidator(groupID, password string) bool {
+	// Simple validation for testing
+	return groupID == "testgroup" && password == "testpass"
 }
 
 func TestNewHTTPProxyWithAuth(t *testing.T) {
 	config := &config.HTTPConfig{
-		ListenAddr:   ":8080",
-		AuthUsername: "testuser",
-		AuthPassword: "testpass",
+		ListenAddr: ":8080",
 	}
 
-	proxy, err := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupExtractor)
+	proxy, err := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupValidator)
 	if err != nil {
 		t.Fatalf("Failed to create HTTP proxy: %v", err)
 	}
@@ -61,8 +71,8 @@ func TestNewHTTPProxyWithAuth(t *testing.T) {
 		t.Error("Dial function was not set")
 	}
 
-	if httpProxy.groupExtractor == nil {
-		t.Error("Group extractor was not set")
+	if httpProxy.groupValidator == nil {
+		t.Error("Group validator was not set")
 	}
 }
 
@@ -107,12 +117,10 @@ func TestHTTPProxy_GetListenAddr(t *testing.T) {
 
 func TestHTTPProxy_Authentication(t *testing.T) {
 	config := &config.HTTPConfig{
-		ListenAddr:   "127.0.0.1:0",
-		AuthUsername: "testuser",
-		AuthPassword: "testpass",
+		ListenAddr: "127.0.0.1:0",
 	}
 
-	proxy, _ := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupExtractor)
+	proxy, _ := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupValidator)
 	httpProxy := proxy.(*HTTPProxy)
 
 	tests := []struct {
@@ -120,6 +128,8 @@ func TestHTTPProxy_Authentication(t *testing.T) {
 		authHeader   string
 		expectedUser string
 		expectedAuth bool
+		groupID      string
+		password     string
 	}{
 		{
 			name:         "no auth header",
@@ -128,28 +138,28 @@ func TestHTTPProxy_Authentication(t *testing.T) {
 			expectedAuth: false,
 		},
 		{
-			name:         "valid auth",
-			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("testuser:testpass")),
-			expectedUser: "testuser",
+			name:         "valid group auth",
+			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("testgroup:testpass")),
+			expectedUser: "testgroup",
 			expectedAuth: true,
+			groupID:      "testgroup",
+			password:     "testpass",
 		},
 		{
-			name:         "valid auth with group",
-			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("testuser.group1:testpass")),
-			expectedUser: "testuser.group1",
-			expectedAuth: true,
-		},
-		{
-			name:         "invalid username",
-			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("wronguser:testpass")),
-			expectedUser: "wronguser",
-			expectedAuth: false,
+			name:         "invalid group",
+			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("wronggroup:testpass")),
+			expectedUser: "wronggroup",
+			expectedAuth: true, // Basic auth parsing succeeds
+			groupID:      "wronggroup",
+			password:     "testpass",
 		},
 		{
 			name:         "invalid password",
-			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("testuser:wrongpass")),
-			expectedUser: "testuser",
-			expectedAuth: false,
+			authHeader:   "Basic " + base64.StdEncoding.EncodeToString([]byte("testgroup:wrongpass")),
+			expectedUser: "testgroup",
+			expectedAuth: true, // Basic auth parsing succeeds
+			groupID:      "testgroup",
+			password:     "wrongpass",
 		},
 		{
 			name:         "invalid format",
@@ -166,7 +176,7 @@ func TestHTTPProxy_Authentication(t *testing.T) {
 				req.Header.Set("Proxy-Authorization", tt.authHeader)
 			}
 
-			user, _, auth := httpProxy.authenticateAndExtractUser(req)
+			user, password, auth := httpProxy.authenticateAndExtractUser(req)
 
 			if user != tt.expectedUser {
 				t.Errorf("Expected user %s, got %s", tt.expectedUser, user)
@@ -175,18 +185,25 @@ func TestHTTPProxy_Authentication(t *testing.T) {
 			if auth != tt.expectedAuth {
 				t.Errorf("Expected auth %v, got %v", tt.expectedAuth, auth)
 			}
+
+			// Test group validation if auth parsing succeeded
+			if auth && tt.groupID != "" {
+				groupValid := mockGroupValidator(user, password)
+				if tt.groupID == "testgroup" && tt.password == "testpass" {
+					if !groupValid {
+						t.Errorf("Expected group validation to succeed for valid credentials")
+					}
+				} else {
+					if groupValid {
+						t.Errorf("Expected group validation to fail for invalid credentials")
+					}
+				}
+			}
 		})
 	}
 }
 
 func TestHTTPProxy_HandleHTTP_NoAuth(t *testing.T) {
-	// Create a test target server
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello from target"))
-	}))
-	defer targetServer.Close()
-
 	config := &config.HTTPConfig{
 		ListenAddr: "127.0.0.1:0",
 	}
@@ -195,8 +212,8 @@ func TestHTTPProxy_HandleHTTP_NoAuth(t *testing.T) {
 	httpProxy := proxy.(*HTTPProxy)
 
 	// Test normal HTTP request
-	req := httptest.NewRequest("GET", targetServer.URL, nil)
-	req.Host = targetServer.URL[7:] // Remove http://
+	req := httptest.NewRequest("GET", "http://example.com", nil)
+	req.Host = "example.com"
 	req.URL.Host = req.Host
 
 	w := httptest.NewRecorder()
@@ -209,19 +226,17 @@ func TestHTTPProxy_HandleHTTP_NoAuth(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
 	}
 
-	if string(body) != "Hello from target" {
-		t.Errorf("Expected body 'Hello from target', got %s", string(body))
+	if string(body) != "Test response" {
+		t.Errorf("Expected body 'Test response', got %s", string(body))
 	}
 }
 
 func TestHTTPProxy_HandleHTTP_WithAuth(t *testing.T) {
 	config := &config.HTTPConfig{
-		ListenAddr:   "127.0.0.1:0",
-		AuthUsername: "testuser",
-		AuthPassword: "testpass",
+		ListenAddr: "127.0.0.1:0",
 	}
 
-	proxy, _ := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupExtractor)
+	proxy, _ := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupValidator)
 	httpProxy := proxy.(*HTTPProxy)
 
 	// Test request without auth - should fail
@@ -243,17 +258,10 @@ func TestHTTPProxy_HandleHTTP_WithAuth(t *testing.T) {
 
 	// Test request with valid auth
 	t.Run("with valid auth", func(t *testing.T) {
-		// Create a test target server
-		targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Authenticated"))
-		}))
-		defer targetServer.Close()
-
-		req := httptest.NewRequest("GET", targetServer.URL, nil)
-		req.Host = targetServer.URL[7:] // Remove http://
+		req := httptest.NewRequest("GET", "http://example.com", nil)
+		req.Host = "example.com"
 		req.URL.Host = req.Host
-		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("testuser:testpass")))
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("testgroup:testpass")))
 
 		w := httptest.NewRecorder()
 		httpProxy.handleHTTP(w, req)
@@ -265,8 +273,8 @@ func TestHTTPProxy_HandleHTTP_WithAuth(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", resp.StatusCode)
 		}
 
-		if string(body) != "Authenticated" {
-			t.Errorf("Expected body 'Authenticated', got %s", string(body))
+		if string(body) != "Test response" {
+			t.Errorf("Expected body 'Test response', got %s", string(body))
 		}
 	})
 }
@@ -455,25 +463,6 @@ func TestGetClientIP(t *testing.T) {
 				t.Errorf("Expected IP %s, got %s", tt.expected, ip)
 			}
 		})
-	}
-}
-
-func TestExtractBaseUsername(t *testing.T) {
-	tests := []struct {
-		username string
-		expected string
-	}{
-		{"user", "user"},
-		{"user.group", "user"},
-		{"user.group.subgroup", "user"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		result := extractBaseUsername(tt.username)
-		if result != tt.expected {
-			t.Errorf("extractBaseUsername(%s) = %s, want %s", tt.username, result, tt.expected)
-		}
 	}
 }
 

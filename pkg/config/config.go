@@ -11,11 +11,9 @@ import (
 
 // Config represents the main configuration
 type Config struct {
-	Proxy     ProxyConfig     `yaml:"proxy"`
-	Transport TransportConfig `yaml:"transport"`
-	Gateway   GatewayConfig   `yaml:"gateway"`
-	Client    ClientConfig    `yaml:"client"`
-	Log       LogConfig       `yaml:"log"`
+	Log     LogConfig     `yaml:"log"`
+	Gateway GatewayConfig `yaml:"gateway"`
+	Client  ClientConfig  `yaml:"client"`
 }
 
 // LogConfig represents the logging configuration
@@ -39,48 +37,31 @@ type ProxyConfig struct {
 
 // GatewayConfig represents the configuration for the proxy gateway
 type GatewayConfig struct {
-	ListenAddr   string    `yaml:"listen_addr"`
-	TLSCert      string    `yaml:"tls_cert"`
-	TLSKey       string    `yaml:"tls_key"`
-	AuthUsername string    `yaml:"auth_username"`
-	AuthPassword string    `yaml:"auth_password"`
-	Web          WebConfig `yaml:"web"`
+	ListenAddr    string      `yaml:"listen_addr"`
+	TransportType string      `yaml:"transport_type"`
+	TLSCert       string      `yaml:"tls_cert"`
+	TLSKey        string      `yaml:"tls_key"`
+	AuthUsername  string      `yaml:"auth_username"`
+	AuthPassword  string      `yaml:"auth_password"`
+	Proxy         ProxyConfig `yaml:"proxy"`
+	Web           WebConfig   `yaml:"web"`
 }
 
 // SOCKS5Config represents the configuration for the SOCKS5 proxy
 type SOCKS5Config struct {
-	ListenAddr   string `yaml:"listen_addr"`
-	AuthUsername string `yaml:"auth_username"`
-	AuthPassword string `yaml:"auth_password"`
-}
-
-// TransportConfig represents the configuration for the transport layer.
-// It specifies which transport protocol to use (websocket, grpc, or quic).
-type TransportConfig struct {
-	Type string `yaml:"type"`
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 // HTTPConfig represents the configuration for the HTTP proxy
 type HTTPConfig struct {
-	ListenAddr   string `yaml:"listen_addr"`
-	AuthUsername string `yaml:"auth_username"`
-	AuthPassword string `yaml:"auth_password"`
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 // TUICConfig represents the configuration for the TUIC proxy
+// Note: TUIC now uses group_id as UUID and password as token dynamically
+// TLS certificates are reused from Gateway configuration
 type TUICConfig struct {
 	ListenAddr string `yaml:"listen_addr"`
-	Token      string `yaml:"token"`     // TUIC token for authentication
-	UUID       string `yaml:"uuid"`      // TUIC UUID for client identification
-	CertFile   string `yaml:"cert_file"` // TLS certificate file (TUIC requires TLS)
-	KeyFile    string `yaml:"key_file"`  // TLS private key file
-}
-
-// ServiceLimit defines allowed services for the client
-type ServiceLimit struct {
-	Name     string `yaml:"name"`
-	Addr     string `yaml:"addr"`
-	Protocol string `yaml:"protocol"` // "tcp" or "udp"
 }
 
 // OpenPort defines a port forwarding configuration
@@ -93,17 +74,24 @@ type OpenPort struct {
 
 // ClientConfig represents the configuration for the proxy client
 type ClientConfig struct {
-	GatewayAddr    string     `yaml:"gateway_addr"`
-	GatewayTLSCert string     `yaml:"gateway_tls_cert"`
-	ClientID       string     `yaml:"client_id"`
-	GroupID        string     `yaml:"group_id"`
-	Replicas       int        `yaml:"replicas"`
-	AuthUsername   string     `yaml:"auth_username"`
-	AuthPassword   string     `yaml:"auth_password"`
-	ForbiddenHosts []string   `yaml:"forbidden_hosts"`
-	AllowedHosts   []string   `yaml:"allowed_hosts"`
-	OpenPorts      []OpenPort `yaml:"open_ports"`
-	Web            WebConfig  `yaml:"web"`
+	ClientID       string              `yaml:"id"`
+	GroupID        string              `yaml:"group_id"`
+	GroupPassword  string              `yaml:"group_password"`
+	Replicas       int                 `yaml:"replicas"`
+	Gateway        ClientGatewayConfig `yaml:"gateway"`
+	ForbiddenHosts []string            `yaml:"forbidden_hosts"`
+	AllowedHosts   []string            `yaml:"allowed_hosts"`
+	OpenPorts      []OpenPort          `yaml:"open_ports"`
+	Web            WebConfig           `yaml:"web"`
+}
+
+// ClientGatewayConfig represents the gateway connection configuration for the client
+type ClientGatewayConfig struct {
+	Addr          string `yaml:"addr"`
+	TransportType string `yaml:"transport_type"`
+	TLSCert       string `yaml:"tls_cert"`
+	AuthUsername  string `yaml:"auth_username"`
+	AuthPassword  string `yaml:"auth_password"`
 }
 
 // WebConfig represents the configuration for the web management interface

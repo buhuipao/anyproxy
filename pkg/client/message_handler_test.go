@@ -52,6 +52,10 @@ func (m *mockConnForHandler) GetGroupID() string {
 	return "test-group"
 }
 
+func (m *mockConnForHandler) GetPassword() string {
+	return "test-password"
+}
+
 func TestReadNextMessage(t *testing.T) {
 	tests := []struct {
 		name       string

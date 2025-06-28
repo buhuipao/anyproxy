@@ -35,17 +35,17 @@ type HTTPProxy struct {
 	config         *config.HTTPConfig
 	server         *http.Server
 	dialFunc       func(ctx context.Context, network, addr string) (net.Conn, error)
-	groupExtractor func(string) string
+	groupValidator func(string, string) bool // Function to validate group credentials
 }
 
 // NewHTTPProxyWithAuth creates a new HTTP proxy with authentication
-func NewHTTPProxyWithAuth(config *config.HTTPConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupExtractor func(string) string) (utils.GatewayProxy, error) {
-	logger.Info("Creating HTTP proxy", "listen_addr", config.ListenAddr, "auth_enabled", config.AuthUsername != "")
+func NewHTTPProxyWithAuth(config *config.HTTPConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupValidator func(string, string) bool) (utils.GatewayProxy, error) {
+	logger.Info("Creating HTTP proxy", "listen_addr", config.ListenAddr, "auth_enabled", "group-based")
 
 	proxy := &HTTPProxy{
 		config:         config,
 		dialFunc:       dialFn,
-		groupExtractor: groupExtractor,
+		groupValidator: groupValidator,
 	}
 
 	// 🚨 Fix: Don't use ServeMux as it can't handle CONNECT requests properly
@@ -115,10 +115,10 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Authentication check
 	var userCtx *utils.UserContext
-	if p.config.AuthUsername != "" && p.config.AuthPassword != "" {
+	if p.groupValidator != nil {
 		logger.Debug("Authentication required, checking credentials", "client", clientAddr)
 
-		username, _, authenticated := p.authenticateAndExtractUser(r)
+		username, password, authenticated := p.authenticateAndExtractUser(r)
 		if !authenticated {
 			logger.Warn("HTTP proxy authentication failed", "client", clientAddr, "method", r.Method, "host", r.Host)
 			w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
@@ -126,20 +126,21 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Extract group ID
-		groupID := ""
-		if p.groupExtractor != nil {
-			groupID = p.groupExtractor(username)
-			logger.Debug("Extracted group ID from username", "username", username, "group_id", groupID)
+		// Validate group credentials
+		if !p.groupValidator(username, password) {
+			logger.Warn("HTTP proxy group authentication failed", "client", clientAddr, "group_id", username)
+			w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			return
 		}
 
 		// Set user context
 		userCtx = &utils.UserContext{
 			Username: username,
-			GroupID:  groupID,
+			GroupID:  username,
 		}
 
-		logger.Debug("HTTP proxy authentication successful", "username", username, "group_id", groupID, "client", clientAddr)
+		logger.Debug("HTTP proxy authentication successful", "username", username, "group_id", username, "client", clientAddr)
 	} else {
 		logger.Debug("No authentication required")
 	}
@@ -202,19 +203,10 @@ func (p *HTTPProxy) authenticateAndExtractUser(r *http.Request) (string, string,
 
 	username, password := parts[0], parts[1]
 
-	// Extract the base username (without group_id) for authentication
-	baseUsername := extractBaseUsername(username)
+	// Basic authentication parsing was successful, actual validation will be done by group validator
+	logger.Debug("Proxy authentication credentials parsed", "remote_addr", r.RemoteAddr, "username", username)
 
-	// Authenticate using the base username and provided password
-	authenticated := baseUsername == p.config.AuthUsername && password == p.config.AuthPassword
-
-	if authenticated {
-		logger.Debug("Proxy authentication successful", "remote_addr", r.RemoteAddr, "username", username, "base_username", baseUsername)
-	} else {
-		logger.Warn("Proxy authentication failed", "remote_addr", r.RemoteAddr, "username", username, "base_username", baseUsername)
-	}
-
-	return username, password, authenticated
+	return username, password, true
 }
 
 // handleConnect handles CONNECT requests for HTTPS tunneling

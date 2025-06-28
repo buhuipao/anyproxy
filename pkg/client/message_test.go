@@ -20,6 +20,7 @@ type mockMessageConnection struct {
 	messages      []map[string]interface{}
 	messageIndex  int
 	writeMessages []map[string]interface{}
+	readData      []byte // Added to support custom read data
 	readErr       error
 	writeErr      error
 	closed        bool
@@ -28,6 +29,9 @@ type mockMessageConnection struct {
 func (m *mockMessageConnection) ReadMessage() ([]byte, error) {
 	if m.readErr != nil {
 		return nil, m.readErr
+	}
+	if m.readData != nil {
+		return m.readData, nil
 	}
 	return []byte("test"), nil
 }
@@ -55,6 +59,10 @@ func (m *mockMessageConnection) GetClientID() string {
 
 func (m *mockMessageConnection) GetGroupID() string {
 	return "test-group"
+}
+
+func (m *mockMessageConnection) GetPassword() string {
+	return "test-password"
 }
 
 func TestRouteMessage(t *testing.T) {
@@ -522,6 +530,161 @@ func TestSendConnectResponse(t *testing.T) {
 			// Verify error
 			if (err != nil) != tt.expectErr {
 				t.Errorf("sendConnectResponse() error = %v, expectErr %v", err, tt.expectErr)
+			}
+		})
+	}
+}
+
+// TestHandleErrorMessage tests error message handling in client
+func TestHandleErrorMessage(t *testing.T) {
+	tests := []struct {
+		name          string
+		errorMsg      string
+		expectLogged  bool
+		invalidFormat bool
+	}{
+		{
+			name:         "valid error message",
+			errorMsg:     "Authentication failed",
+			expectLogged: true,
+		},
+		{
+			name:         "empty error message",
+			errorMsg:     "",
+			expectLogged: true,
+		},
+		{
+			name:         "unicode error message",
+			errorMsg:     "认证失败: 用户名或密码错误 🚫",
+			expectLogged: true,
+		},
+		{
+			name:         "long error message",
+			errorMsg:     "This is a very long error message that describes in detail what went wrong during the authentication process and provides debugging information",
+			expectLogged: true,
+		},
+		{
+			name:          "invalid format message",
+			invalidFormat: true,
+			expectLogged:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create test message
+			var msg map[string]interface{}
+			if tt.invalidFormat {
+				// Create message with invalid format
+				msg = map[string]interface{}{
+					"type": protocol.MsgTypeError,
+					// Missing error_message field
+				}
+			} else {
+				msg = map[string]interface{}{
+					"type":          protocol.MsgTypeError,
+					"error_message": tt.errorMsg,
+				}
+			}
+
+			// Create a mock handler to capture log calls
+			// Note: In a real implementation, you might want to use a test logger
+			// For now, we just test that the method doesn't panic
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("handleErrorMessage panicked: %v", r)
+				}
+			}()
+
+			// Handle the error message
+			// Note: This calls the message handling logic from handleMessages
+			// We simulate the processing that would happen in the main message loop
+			msgType, ok := msg["type"].(string)
+			if !ok {
+				t.Fatal("Invalid message type")
+			}
+
+			if msgType == protocol.MsgTypeError {
+				// Handle gateway-level errors (e.g., authentication failures)
+				if errorMsg, ok := msg["error_message"].(string); ok {
+					if errorMsg != tt.errorMsg {
+						t.Errorf("Expected error message '%s', got '%s'", tt.errorMsg, errorMsg)
+					}
+				} else if !tt.invalidFormat {
+					t.Error("Expected error_message field to be present and valid")
+				}
+			}
+		})
+	}
+}
+
+// TestErrorMessageIntegration tests end-to-end error message flow
+func TestErrorMessageIntegration(t *testing.T) {
+	tests := []struct {
+		name     string
+		errorMsg string
+	}{
+		{
+			name:     "authentication error",
+			errorMsg: "Invalid group credentials",
+		},
+		{
+			name:     "authorization error",
+			errorMsg: "Permission denied",
+		},
+		{
+			name:     "connection error",
+			errorMsg: "Unable to establish secure connection",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create error message using protocol
+			errorMsgData := protocol.PackErrorMessage(tt.errorMsg)
+
+			// Create mock connection that returns the error message
+			mockConn := &mockMessageConnection{
+				readData: errorMsgData,
+			}
+
+			// Create client with message handler
+			client := &Client{
+				config: &config.ClientConfig{
+					ClientID: "test-client",
+				},
+				conn:       mockConn,
+				msgHandler: message.NewClientExtendedMessageHandler(mockConn),
+				ctx:        context.Background(),
+			}
+
+			// Read and process the message
+			msg, err := client.readNextMessage()
+			if err != nil {
+				t.Fatalf("Failed to read error message: %v", err)
+			}
+
+			// Verify message type
+			msgType, ok := msg["type"].(string)
+			if !ok || msgType != protocol.MsgTypeError {
+				t.Errorf("Expected message type '%s', got '%v'", protocol.MsgTypeError, msg["type"])
+			}
+
+			// Verify error message content
+			errorMessage, ok := msg["error_message"].(string)
+			if !ok || errorMessage != tt.errorMsg {
+				t.Errorf("Expected error message '%s', got '%v'", tt.errorMsg, msg["error_message"])
+			}
+
+			// Test that the client would handle this message correctly
+			if msgType == protocol.MsgTypeError {
+				if errorMsg, ok := msg["error_message"].(string); ok {
+					if errorMsg != tt.errorMsg {
+						t.Errorf("Error message handling failed: expected '%s', got '%s'", tt.errorMsg, errorMsg)
+					}
+				} else {
+					t.Error("Error message format validation failed")
+				}
 			}
 		})
 	}

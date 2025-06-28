@@ -65,9 +65,9 @@ func main() {
 
 	var clients []*client.Client
 	for i := 0; i < cfg.Client.Replicas; i++ {
-		// Create and start client (using WebSocket transport layer)
+		// Create and start client using the transport type from client gateway config
 		// Fix: Pass replica index i to ensure each client has unique ID
-		proxyClient, err := client.NewClient(&cfg.Client, cfg.Transport.Type, i)
+		proxyClient, err := client.NewClient(&cfg.Client, cfg.Client.Gateway.TransportType, i)
 		if err != nil {
 			logger.Error("Failed to create client", "replica_idx", i, "err", err)
 			os.Exit(1)
@@ -86,7 +86,7 @@ func main() {
 
 		clients = append(clients, proxyClient)
 	}
-	logger.Info("Started clients", "count", cfg.Client.Replicas, "gateway_addr", cfg.Client.GatewayAddr)
+	logger.Info("Started clients", "count", cfg.Client.Replicas, "gateway_addr", cfg.Client.Gateway.Addr)
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)

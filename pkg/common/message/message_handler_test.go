@@ -179,3 +179,187 @@ func TestExtendedMessageHandler(t *testing.T) {
 		t.Fatalf("WriteConnectMessage failed: %v", err)
 	}
 }
+
+// TestErrorMessageHandler tests error message handling
+func TestErrorMessageHandler(t *testing.T) {
+	tests := []struct {
+		name         string
+		errorMsg     string
+		isClient     bool
+		expectedType string
+	}{
+		{
+			name:         "client error message",
+			errorMsg:     "Authentication failed",
+			isClient:     true,
+			expectedType: protocol.MsgTypeError,
+		},
+		{
+			name:         "gateway error message",
+			errorMsg:     "Group credentials mismatch",
+			isClient:     false,
+			expectedType: protocol.MsgTypeError,
+		},
+		{
+			name:         "empty error message",
+			errorMsg:     "",
+			isClient:     true,
+			expectedType: protocol.MsgTypeError,
+		},
+		{
+			name:         "unicode error message",
+			errorMsg:     "认证失败: 用户名或密码错误 🚫",
+			isClient:     false,
+			expectedType: protocol.MsgTypeError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pack error message
+			errorMsg := protocol.PackErrorMessage(tt.errorMsg)
+
+			mockConn := &mockMessageConnection{
+				readData: errorMsg,
+			}
+
+			var handler Handler
+			if tt.isClient {
+				handler = NewClientMessageHandler(mockConn)
+			} else {
+				handler = NewGatewayMessageHandler(mockConn)
+			}
+
+			// Read and parse error message
+			msg, err := handler.ReadNextMessage()
+			if err != nil {
+				t.Fatalf("ReadNextMessage failed: %v", err)
+			}
+
+			// Verify message type
+			if msgType, ok := msg["type"].(string); !ok || msgType != tt.expectedType {
+				t.Errorf("Expected message type '%s', got '%v'", tt.expectedType, msg["type"])
+			}
+
+			// Verify error message content
+			if errorMessage, ok := msg["error_message"].(string); !ok || errorMessage != tt.errorMsg {
+				t.Errorf("Expected error message '%s', got '%v'", tt.errorMsg, msg["error_message"])
+			}
+		})
+	}
+}
+
+// TestExtendedMessageHandler_WriteErrorMessage tests writing error messages
+func TestExtendedMessageHandler_WriteErrorMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		errorMsg string
+		isClient bool
+	}{
+		{
+			name:     "client write error",
+			errorMsg: "Connection failed",
+			isClient: true,
+		},
+		{
+			name:     "gateway write error",
+			errorMsg: "Invalid group credentials",
+			isClient: false,
+		},
+		{
+			name:     "long error message",
+			errorMsg: "This is a very long error message that contains detailed information about what went wrong during the authentication process",
+			isClient: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockConn := &mockMessageConnection{}
+
+			var handler ExtendedMessageHandler
+			if tt.isClient {
+				handler = NewClientExtendedMessageHandler(mockConn)
+			} else {
+				handler = NewGatewayExtendedMessageHandler(mockConn)
+			}
+
+			// Write error message
+			err := handler.WriteErrorMessage(tt.errorMsg)
+			if err != nil {
+				t.Fatalf("WriteErrorMessage failed: %v", err)
+			}
+
+			// Verify that data was written
+			if mockConn.writeData == nil {
+				t.Error("No data was written")
+				return
+			}
+
+			// Verify the written data is a valid error message
+			version, msgType, payload, err := protocol.UnpackBinaryHeader(mockConn.writeData)
+			if err != nil {
+				t.Fatalf("Failed to unpack written data header: %v", err)
+			}
+
+			if version != protocol.BinaryProtocolVersion {
+				t.Errorf("Expected version %d, got %d", protocol.BinaryProtocolVersion, version)
+			}
+
+			if msgType != protocol.BinaryMsgTypeError {
+				t.Errorf("Expected message type %d, got %d", protocol.BinaryMsgTypeError, msgType)
+			}
+
+			// Unpack and verify error message content
+			unpackedErrorMsg, err := protocol.UnpackErrorMessage(payload)
+			if err != nil {
+				t.Fatalf("Failed to unpack error message: %v", err)
+			}
+
+			if unpackedErrorMsg != tt.errorMsg {
+				t.Errorf("Expected error message '%s', got '%s'", tt.errorMsg, unpackedErrorMsg)
+			}
+		})
+	}
+}
+
+// TestErrorMessageHandler_InvalidData tests error message handling with invalid data
+func TestErrorMessageHandler_InvalidData(t *testing.T) {
+	t.Run("invalid error message data", func(t *testing.T) {
+		// Create invalid error message (too short)
+		invalidData := []byte{protocol.BinaryProtocolVersion, protocol.BinaryMsgTypeError, 0x00} // Missing length bytes
+
+		mockConn := &mockMessageConnection{
+			readData: invalidData,
+		}
+
+		handler := NewClientMessageHandler(mockConn)
+
+		// Should fail to parse
+		_, err := handler.ReadNextMessage()
+		if err == nil {
+			t.Error("Expected error when parsing invalid error message data")
+		}
+	})
+
+	t.Run("error message with corrupted length", func(t *testing.T) {
+		// Create error message with invalid length field
+		invalidData := []byte{
+			protocol.BinaryProtocolVersion,
+			protocol.BinaryMsgTypeError,
+			0x00, 0x10, // Length = 16 but no data follows
+		}
+
+		mockConn := &mockMessageConnection{
+			readData: invalidData,
+		}
+
+		handler := NewGatewayMessageHandler(mockConn)
+
+		// Should fail to parse
+		_, err := handler.ReadNextMessage()
+		if err == nil {
+			t.Error("Expected error when parsing error message with corrupted length")
+		}
+	})
+}

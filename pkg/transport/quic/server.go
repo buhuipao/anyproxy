@@ -141,7 +141,7 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Debug("QUIC stream accepted")
 
 	// 🚨 Fix: Wait for and validate authentication message
-	clientID, groupID, err := t.authenticateConnection(stream)
+	clientID, groupID, groupPassword, err := t.authenticateConnection(stream)
 	if err != nil {
 		logger.Warn("QUIC connection rejected during authentication", "remote_addr", conn.RemoteAddr(), "err", err)
 		if err := conn.CloseWithError(1, "authentication failed"); err != nil {
@@ -153,7 +153,7 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Info("Client connected via QUIC", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
 
 	// Create server connection
-	quicConn := newQUICServerConnection(stream, conn, clientID, groupID)
+	quicConn := newQUICServerConnection(stream, conn, clientID, groupID, groupPassword)
 
 	// Call connection handler, don't use recover to hide issues
 	defer func() {
@@ -167,7 +167,7 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 }
 
 // authenticateConnection authenticates QUIC connection and extracts client information
-func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, groupID string, err error) {
+func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, groupID, password string, err error) {
 	// Create temporary connection to read authentication message
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -211,39 +211,39 @@ func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, gr
 	case authData = <-tempConn.readChan:
 		// Successfully received authentication data
 	case err = <-tempConn.errorChan:
-		return "", "", fmt.Errorf("failed to read auth message: %v", err)
+		return "", "", "", fmt.Errorf("failed to read auth message: %v", err)
 	case <-timeout:
-		return "", "", fmt.Errorf("authentication timeout")
+		return "", "", "", fmt.Errorf("authentication timeout")
 	}
 
 	// Verify if it's a binary protocol message
 	if !protocol.IsBinaryMessage(authData) {
-		return "", "", fmt.Errorf("received non-binary auth message")
+		return "", "", "", fmt.Errorf("received non-binary auth message")
 	}
 
 	// Parse binary message header
 	version, msgType, data, err := protocol.UnpackBinaryHeader(authData)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to unpack auth message: %v", err)
+		return "", "", "", fmt.Errorf("failed to unpack auth message: %v", err)
 	}
 
 	_ = version // Version not used for now
 
 	if msgType != protocol.BinaryMsgTypeAuth {
-		return "", "", fmt.Errorf("expected auth message, got: 0x%02x", msgType)
+		return "", "", "", fmt.Errorf("expected auth message, got: 0x%02x", msgType)
 	}
 
 	// Parse authentication message
-	clientID, groupID, username, password, err := protocol.UnpackAuthMessage(data)
+	clientID, groupID, username, password, groupPassword, err := protocol.UnpackAuthMessage(data)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse auth message: %v", err)
+		return "", "", "", fmt.Errorf("failed to parse auth message: %v", err)
 	}
 
 	if clientID == "" {
-		return "", "", fmt.Errorf("missing client_id")
+		return "", "", "", fmt.Errorf("missing client_id")
 	}
 
-	// Verify authentication information
+	// Verify authentication information (Gateway transport layer auth)
 	var responseStatus, responseReason string
 	if t.authConfig != nil && t.authConfig.Username != "" {
 		if username != t.authConfig.Username || password != t.authConfig.Password {
@@ -260,16 +260,16 @@ func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, gr
 	// Build response message
 	authResponse := protocol.PackAuthResponseMessage(responseStatus, responseReason)
 	if writeErr := tempConn.writeData(authResponse); writeErr != nil {
-		return "", "", fmt.Errorf("failed to send auth response: %v", writeErr)
+		return "", "", "", fmt.Errorf("failed to send auth response: %v", writeErr)
 	}
 
 	if responseStatus != authStatusSuccess {
-		return "", "", errors.New(responseReason)
+		return "", "", "", errors.New(responseReason)
 	}
 
 	logger.Debug("QUIC authentication completed successfully", "client_id", clientID, "group_id", groupID)
 
-	return clientID, groupID, nil
+	return clientID, groupID, groupPassword, nil
 }
 
 // DialWithConfig implements Transport interface - client connection

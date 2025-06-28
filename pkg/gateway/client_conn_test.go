@@ -789,6 +789,10 @@ func (m *mockConnectionExt) GetGroupID() string {
 	return m.groupID
 }
 
+func (m *mockConnectionExt) GetPassword() string {
+	return "test-password" // Default test password
+}
+
 func (m *mockConnectionExt) SetDeadline(t time.Time) error {
 	return nil
 }

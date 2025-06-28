@@ -148,6 +148,18 @@ func (h *BinaryMessageHandler) parseClientMessage(msgType byte, data []byte) (ma
 			"ports":   statusMap,
 		}, nil
 
+	case protocol.BinaryMsgTypeError:
+		// Error message
+		errorMsg, err := protocol.UnpackErrorMessage(data)
+		if err != nil {
+			return nil, err
+		}
+
+		return map[string]interface{}{
+			"type":          protocol.MsgTypeError,
+			"error_message": errorMsg,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown binary message type for client: 0x%02x", msgType)
 	}
@@ -220,6 +232,18 @@ func (h *BinaryMessageHandler) parseGatewayMessage(msgType byte, data []byte) (m
 			"open_ports": openPorts,
 		}, nil
 
+	case protocol.BinaryMsgTypeError:
+		// Error message
+		errorMsg, err := protocol.UnpackErrorMessage(data)
+		if err != nil {
+			return nil, err
+		}
+
+		return map[string]interface{}{
+			"type":          protocol.MsgTypeError,
+			"error_message": errorMsg,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown binary message type for gateway: 0x%02x", msgType)
 	}
@@ -248,6 +272,8 @@ type ExtendedMessageHandler interface {
 	WriteConnectResponse(connID string, success bool, errorMsg string) error
 	// Gateway-specific methods
 	WriteConnectMessage(connID, network, address string) error
+	// Common methods
+	WriteErrorMessage(errorMsg string) error
 }
 
 // ExtendedBinaryMessageHandler extended binary message handler
@@ -287,6 +313,14 @@ func (h *ExtendedBinaryMessageHandler) WriteConnectResponse(connID string, succe
 func (h *ExtendedBinaryMessageHandler) WriteConnectMessage(connID, network, address string) error {
 	// Use binary format
 	binaryMsg := protocol.PackConnectMessage(connID, network, address)
+
+	return h.conn.WriteMessage(binaryMsg)
+}
+
+// WriteErrorMessage sends error message using binary format (used by both client and gateway)
+func (h *ExtendedBinaryMessageHandler) WriteErrorMessage(errorMsg string) error {
+	// Use binary format
+	binaryMsg := protocol.PackErrorMessage(errorMsg)
 
 	return h.conn.WriteMessage(binaryMsg)
 }

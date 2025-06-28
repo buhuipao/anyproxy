@@ -216,3 +216,7 @@ func (m *mockConnForPortForward) GetClientID() string {
 func (m *mockConnForPortForward) GetGroupID() string {
 	return "test-group"
 }
+
+func (m *mockConnForPortForward) GetPassword() string {
+	return "test-password"
+}

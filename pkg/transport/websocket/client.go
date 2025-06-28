@@ -36,9 +36,10 @@ func (t *webSocketTransport) dialWebSocketWithConfig(addr string, config *transp
 	headers := http.Header{}
 	headers.Set("X-Client-ID", config.ClientID)
 	headers.Set("X-Group-ID", config.GroupID)
+	headers.Set("X-Group-Password", config.GroupPassword)
 	logger.Debug("WebSocket headers prepared", "client_id", config.ClientID, "group_id", config.GroupID)
 
-	// Use Basic Auth for authentication
+	// Use Basic Auth for authentication (Gateway transport layer auth)
 	auth := base64.StdEncoding.EncodeToString(
 		[]byte(config.Username + ":" + config.Password),
 	)
@@ -70,7 +71,7 @@ func (t *webSocketTransport) dialWebSocketWithConfig(addr string, config *transp
 	}
 
 	// Create high-performance connection with integrated Writer, pass client information
-	wsConn := NewWebSocketConnectionWithInfo(conn, config.ClientID, config.GroupID)
+	wsConn := NewWebSocketConnectionWithInfo(conn, config.ClientID, config.GroupID, config.GroupPassword)
 
 	logger.Info("WebSocket connection established successfully", "client_id", config.ClientID, "group_id", config.GroupID)
 

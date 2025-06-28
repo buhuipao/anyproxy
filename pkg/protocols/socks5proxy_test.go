@@ -12,12 +12,10 @@ import (
 
 func TestNewSOCKS5ProxyWithAuth(t *testing.T) {
 	config := &config.SOCKS5Config{
-		ListenAddr:   ":1080",
-		AuthUsername: "testuser",
-		AuthPassword: "testpass",
+		ListenAddr: ":1080",
 	}
 
-	proxy, err := NewSOCKS5ProxyWithAuth(config, mockDialFunc, mockGroupExtractor)
+	proxy, err := NewSOCKS5ProxyWithAuth(config, mockDialFunc, mockGroupValidator)
 	if err != nil {
 		t.Fatalf("Failed to create SOCKS5 proxy: %v", err)
 	}
@@ -35,12 +33,8 @@ func TestNewSOCKS5ProxyWithAuth(t *testing.T) {
 		t.Error("Dial function was not set")
 	}
 
-	if socks5Proxy.groupExtractor == nil {
-		t.Error("Group extractor was not set")
-	}
-
-	if socks5Proxy.server == nil {
-		t.Error("SOCKS5 server was not created")
+	if socks5Proxy.groupValidator == nil {
+		t.Error("Group validator was not set")
 	}
 }
 
@@ -91,8 +85,7 @@ func TestSOCKS5Proxy_GetListenAddr(t *testing.T) {
 
 func TestGroupBasedCredentialStore_Valid(t *testing.T) {
 	store := &GroupBasedCredentialStore{
-		ConfigUsername: "testuser",
-		ConfigPassword: "testpass",
+		GroupValidator: mockGroupValidator,
 	}
 
 	tests := []struct {
@@ -102,26 +95,20 @@ func TestGroupBasedCredentialStore_Valid(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "valid credentials",
-			username: "testuser",
+			name:     "valid group credentials",
+			username: "testgroup",
 			password: "testpass",
 			expected: true,
 		},
 		{
-			name:     "valid credentials with group",
-			username: "testuser.group1",
-			password: "testpass",
-			expected: true,
-		},
-		{
-			name:     "invalid username",
-			username: "wronguser",
+			name:     "invalid group",
+			username: "wronggroup",
 			password: "testpass",
 			expected: false,
 		},
 		{
 			name:     "invalid password",
-			username: "testuser",
+			username: "testgroup",
 			password: "wrongpass",
 			expected: false,
 		},
@@ -193,12 +180,10 @@ func TestSOCKS5Proxy_DialFunction(t *testing.T) {
 	}
 
 	config := &config.SOCKS5Config{
-		ListenAddr:   "127.0.0.1:0",
-		AuthUsername: "testuser",
-		AuthPassword: "testpass",
+		ListenAddr: "127.0.0.1:0",
 	}
 
-	proxy, err := NewSOCKS5ProxyWithAuth(config, testDialFunc, mockGroupExtractor)
+	proxy, err := NewSOCKS5ProxyWithAuth(config, testDialFunc, mockGroupValidator)
 	if err != nil {
 		t.Fatalf("Failed to create proxy: %v", err)
 	}

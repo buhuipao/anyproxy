@@ -19,115 +19,103 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "valid complete config",
 			configYAML: `
-proxy:
-  socks5:
-    listen_addr: "127.0.0.1:1080"
-    auth_username: "testuser"
-    auth_password: "testpass"
-  http:
-    listen_addr: "127.0.0.1:8080"
-    auth_username: "httpuser"
-    auth_password: "httppass"
 gateway:
   listen_addr: "0.0.0.0:8443"
   tls_cert: "/path/to/cert.pem"
   tls_key: "/path/to/key.pem"
   auth_username: "gatewayuser"
   auth_password: "gatewaypass"
+  proxy:
+    socks5:
+      listen_addr: "127.0.0.1:1080"
+    http:
+      listen_addr: "127.0.0.1:8080"
 client:
-  gateway_addr: "gateway.example.com:8443"
-  gateway_tls_cert: "/path/to/gateway-cert.pem"
-  client_id: "test-client-id"
+  id: "test-client-id"
+  group_id: "test-group"
+  group_password: "clientpass"
   replicas: 3
-  auth_username: "clientuser"
-  auth_password: "clientpass"
+  gateway:
+    addr: "gateway.example.com:8443"
+    tls_cert: "/path/to/gateway-cert.pem"
+    auth_username: "clientuser"
+    auth_password: "clientpass"
   forbidden_hosts:
     - "forbidden.example.com"
     - "blocked.test"
-  allowed_hosts:
-    - "allowed.example.com"
-    - "trusted.test"
-log:
-  level: "info"
-  format: "json"
-  output: "stdout"
-  file: "/var/log/anyproxy.log"
-  max_size: 100
-  max_backups: 3
-  max_age: 28
-  compress: true
 `,
 			wantErr: false,
 			expectedCfg: &Config{
-				Proxy: ProxyConfig{
-					SOCKS5: SOCKS5Config{
-						ListenAddr:   "127.0.0.1:1080",
-						AuthUsername: "testuser",
-						AuthPassword: "testpass",
-					},
-					HTTP: HTTPConfig{
-						ListenAddr:   "127.0.0.1:8080",
-						AuthUsername: "httpuser",
-						AuthPassword: "httppass",
-					},
-				},
 				Gateway: GatewayConfig{
 					ListenAddr:   "0.0.0.0:8443",
 					TLSCert:      "/path/to/cert.pem",
 					TLSKey:       "/path/to/key.pem",
 					AuthUsername: "gatewayuser",
 					AuthPassword: "gatewaypass",
+					Proxy: ProxyConfig{
+						SOCKS5: SOCKS5Config{
+							ListenAddr: "127.0.0.1:1080",
+						},
+						HTTP: HTTPConfig{
+							ListenAddr: "127.0.0.1:8080",
+						},
+					},
 				},
 				Client: ClientConfig{
-					GatewayAddr:    "gateway.example.com:8443",
-					GatewayTLSCert: "/path/to/gateway-cert.pem",
-					ClientID:       "test-client-id",
-					Replicas:       3,
-					AuthUsername:   "clientuser",
-					AuthPassword:   "clientpass",
+					ClientID:      "test-client-id",
+					GroupID:       "test-group",
+					GroupPassword: "clientpass",
+					Replicas:      3,
+					Gateway: ClientGatewayConfig{
+						Addr:         "gateway.example.com:8443",
+						TLSCert:      "/path/to/gateway-cert.pem",
+						AuthUsername: "clientuser",
+						AuthPassword: "clientpass",
+					},
 					ForbiddenHosts: []string{"forbidden.example.com", "blocked.test"},
-					AllowedHosts:   []string{"allowed.example.com", "trusted.test"},
-				},
-				Log: LogConfig{
-					Level:      "info",
-					Format:     "json",
-					Output:     "stdout",
-					File:       "/var/log/anyproxy.log",
-					MaxSize:    100,
-					MaxBackups: 3,
-					MaxAge:     28,
-					Compress:   true,
 				},
 			},
 		},
 		{
-			name: "minimal valid config",
+			name: "minimal config",
 			configYAML: `
-proxy:
-  socks5:
-    listen_addr: "127.0.0.1:1080"
 gateway:
   listen_addr: "0.0.0.0:8443"
+  auth_username: "admin"
+  auth_password: "secret"
+  proxy:
+    http:
+      listen_addr: "127.0.0.1:8080"
 client:
-  gateway_addr: "gateway.example.com:8443"
-log:
-  level: "info"
+  id: "minimal-client"
+  group_id: "default"
+  group_password: "pass"
+  gateway:
+    addr: "localhost:8443"
+    auth_username: "admin"
+    auth_password: "secret"
 `,
 			wantErr: false,
 			expectedCfg: &Config{
-				Proxy: ProxyConfig{
-					SOCKS5: SOCKS5Config{
-						ListenAddr: "127.0.0.1:1080",
+				Gateway: GatewayConfig{
+					ListenAddr:   "0.0.0.0:8443",
+					AuthUsername: "admin",
+					AuthPassword: "secret",
+					Proxy: ProxyConfig{
+						HTTP: HTTPConfig{
+							ListenAddr: "127.0.0.1:8080",
+						},
 					},
 				},
-				Gateway: GatewayConfig{
-					ListenAddr: "0.0.0.0:8443",
-				},
 				Client: ClientConfig{
-					GatewayAddr: "gateway.example.com:8443",
-				},
-				Log: LogConfig{
-					Level: "info",
+					ClientID:      "minimal-client",
+					GroupID:       "default",
+					GroupPassword: "pass",
+					Gateway: ClientGatewayConfig{
+						Addr:         "localhost:8443",
+						AuthUsername: "admin",
+						AuthPassword: "secret",
+					},
 				},
 			},
 		},
@@ -308,62 +296,56 @@ func TestConfigStructs(t *testing.T) {
 	// Test that all config structs can be instantiated
 	t.Run("Config instantiation", func(t *testing.T) {
 		cfg := &Config{
-			Proxy: ProxyConfig{
-				SOCKS5: SOCKS5Config{
-					ListenAddr:   "127.0.0.1:1080",
-					AuthUsername: "user",
-					AuthPassword: "pass",
-				},
-				HTTP: HTTPConfig{
-					ListenAddr:   "127.0.0.1:8080",
-					AuthUsername: "httpuser",
-					AuthPassword: "httppass",
-				},
-			},
 			Gateway: GatewayConfig{
 				ListenAddr:   "0.0.0.0:8443",
 				TLSCert:      "/cert.pem",
 				TLSKey:       "/key.pem",
 				AuthUsername: "gw",
 				AuthPassword: "gwpass",
+				Proxy: ProxyConfig{
+					SOCKS5: SOCKS5Config{
+						ListenAddr: "127.0.0.1:1080",
+					},
+					HTTP: HTTPConfig{
+						ListenAddr: "127.0.0.1:8080",
+					},
+				},
 			},
 			Client: ClientConfig{
-				GatewayAddr:    "gw.example.com:8443",
-				GatewayTLSCert: "/gw-cert.pem",
-				ClientID:       "client1",
-				Replicas:       2,
-				AuthUsername:   "client",
-				AuthPassword:   "clientpass",
-				ForbiddenHosts: []string{"bad.com"},
-				AllowedHosts:   []string{"good.com"},
-			},
-			Log: LogConfig{
-				Level:      "info",
-				Format:     "json",
-				Output:     "file",
-				File:       "/tmp/log.txt",
-				MaxSize:    100,
-				MaxBackups: 3,
-				MaxAge:     30,
-				Compress:   true,
+				ClientID:      "client1",
+				GroupID:       "group1",
+				GroupPassword: "pass",
+				Replicas:      2,
+				Gateway: ClientGatewayConfig{
+					Addr:         "gw.example.com:8443",
+					TLSCert:      "/gw-cert.pem",
+					AuthUsername: "user",
+					AuthPassword: "pass",
+				},
+				ForbiddenHosts: []string{"blocked.com"},
+				AllowedHosts:   []string{"allowed.com"},
 			},
 		}
 
-		assert.NotNil(t, cfg)
-		assert.Equal(t, "127.0.0.1:1080", cfg.Proxy.SOCKS5.ListenAddr)
-		assert.Equal(t, "127.0.0.1:8080", cfg.Proxy.HTTP.ListenAddr)
-		assert.Equal(t, "0.0.0.0:8443", cfg.Gateway.ListenAddr)
-		assert.Equal(t, "gw.example.com:8443", cfg.Client.GatewayAddr)
-		assert.Equal(t, "info", cfg.Log.Level)
-		assert.Len(t, cfg.Client.ForbiddenHosts, 1)
-		assert.Len(t, cfg.Client.AllowedHosts, 1)
+		if cfg.Gateway.ListenAddr != "0.0.0.0:8443" {
+			t.Errorf("Gateway.ListenAddr = %s, want 0.0.0.0:8443", cfg.Gateway.ListenAddr)
+		}
+		if cfg.Client.ClientID != "client1" {
+			t.Errorf("Client.ClientID = %s, want client1", cfg.Client.ClientID)
+		}
+		if cfg.Gateway.Proxy.HTTP.ListenAddr != "127.0.0.1:8080" {
+			t.Errorf("Gateway.Proxy.HTTP.ListenAddr = %s, want 127.0.0.1:8080", cfg.Gateway.Proxy.HTTP.ListenAddr)
+		}
+		if cfg.Client.Gateway.Addr != "gw.example.com:8443" {
+			t.Errorf("Client.Gateway.Addr = %s, want gw.example.com:8443", cfg.Client.Gateway.Addr)
+		}
 	})
 
 	t.Run("Zero values", func(t *testing.T) {
 		cfg := &Config{}
-		assert.Equal(t, "", cfg.Proxy.SOCKS5.ListenAddr)
+		assert.Equal(t, "", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
 		assert.Equal(t, "", cfg.Gateway.ListenAddr)
-		assert.Equal(t, "", cfg.Client.GatewayAddr)
+		assert.Equal(t, "", cfg.Client.Gateway.Addr)
 		assert.Equal(t, "", cfg.Log.Level)
 		assert.Equal(t, 0, cfg.Client.Replicas)
 		assert.Nil(t, cfg.Client.ForbiddenHosts)
@@ -375,28 +357,27 @@ func TestConfigStructs(t *testing.T) {
 func TestConfigYAMLTags(t *testing.T) {
 	// Test that YAML tags work correctly by loading and comparing configs
 	configYAML := `
-proxy:
-  socks5:
-    listen_addr: "test:1080"
-    auth_username: "socks5user"
-    auth_password: "socks5pass"
-  http:
-    listen_addr: "test:8080"
-    auth_username: "httpuser"
-    auth_password: "httppass"
 gateway:
   listen_addr: "test:8443"
   tls_cert: "test.crt"
   tls_key: "test.key"
   auth_username: "gwuser"
   auth_password: "gwpass"
+  proxy:
+    socks5:
+      listen_addr: "test:1080"
+    http:
+      listen_addr: "test:8080"
 client:
-  gateway_addr: "gw.test:8443"
-  gateway_tls_cert: "gw.crt"
-  client_id: "test-client"
+  id: "test-client"
+  group_id: "test-group"
+  group_password: "clientpass"
   replicas: 5
-  auth_username: "clientuser"
-  auth_password: "clientpass"
+  gateway:
+    addr: "gw.test:8443"
+    tls_cert: "gw.crt"
+    auth_username: "clientuser"
+    auth_password: "clientpass"
   forbidden_hosts: ["bad1.com", "bad2.com"]
   allowed_hosts: ["good1.com", "good2.com"]
 log:
@@ -421,13 +402,8 @@ log:
 	require.NotNil(t, cfg)
 
 	// Verify all fields are loaded correctly
-	assert.Equal(t, "test:1080", cfg.Proxy.SOCKS5.ListenAddr)
-	assert.Equal(t, "socks5user", cfg.Proxy.SOCKS5.AuthUsername)
-	assert.Equal(t, "socks5pass", cfg.Proxy.SOCKS5.AuthPassword)
-
-	assert.Equal(t, "test:8080", cfg.Proxy.HTTP.ListenAddr)
-	assert.Equal(t, "httpuser", cfg.Proxy.HTTP.AuthUsername)
-	assert.Equal(t, "httppass", cfg.Proxy.HTTP.AuthPassword)
+	assert.Equal(t, "test:1080", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
+	assert.Equal(t, "test:8080", cfg.Gateway.Proxy.HTTP.ListenAddr)
 
 	assert.Equal(t, "test:8443", cfg.Gateway.ListenAddr)
 	assert.Equal(t, "test.crt", cfg.Gateway.TLSCert)
@@ -435,12 +411,14 @@ log:
 	assert.Equal(t, "gwuser", cfg.Gateway.AuthUsername)
 	assert.Equal(t, "gwpass", cfg.Gateway.AuthPassword)
 
-	assert.Equal(t, "gw.test:8443", cfg.Client.GatewayAddr)
-	assert.Equal(t, "gw.crt", cfg.Client.GatewayTLSCert)
+	assert.Equal(t, "gw.test:8443", cfg.Client.Gateway.Addr)
+	assert.Equal(t, "gw.crt", cfg.Client.Gateway.TLSCert)
 	assert.Equal(t, "test-client", cfg.Client.ClientID)
+	assert.Equal(t, "test-group", cfg.Client.GroupID)
+	assert.Equal(t, "clientpass", cfg.Client.GroupPassword)
 	assert.Equal(t, 5, cfg.Client.Replicas)
-	assert.Equal(t, "clientuser", cfg.Client.AuthUsername)
-	assert.Equal(t, "clientpass", cfg.Client.AuthPassword)
+	assert.Equal(t, "clientuser", cfg.Client.Gateway.AuthUsername)
+	assert.Equal(t, "clientpass", cfg.Client.Gateway.AuthPassword)
 	assert.Equal(t, []string{"bad1.com", "bad2.com"}, cfg.Client.ForbiddenHosts)
 	assert.Equal(t, []string{"good1.com", "good2.com"}, cfg.Client.AllowedHosts)
 

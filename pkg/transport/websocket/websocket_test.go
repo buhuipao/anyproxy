@@ -263,7 +263,7 @@ func TestWebSocketConnection_ClientInfo(t *testing.T) {
 		defer conn.Close()
 
 		// Create WebSocket connection wrapper with client info
-		wsConn := NewWebSocketConnectionWithInfo(conn, clientID, groupID)
+		wsConn := NewWebSocketConnectionWithInfo(conn, clientID, groupID, "test-password")
 
 		// Test that client info is properly stored
 		// Cast to the concrete type to access client info methods
