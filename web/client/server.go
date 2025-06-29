@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
+	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	"gopkg.in/yaml.v2"
 )
 
 // Session represents a user session
@@ -191,6 +194,36 @@ func toClientMetricsResponse(metrics *monitoring.ClientMetrics) *MetricsResponse
 	}
 }
 
+// ClashProfile represents a clash configuration profile
+type ClashProfile struct {
+	Port               int               `yaml:"port"`
+	SocksPort          int               `yaml:"socks-port"`
+	AllowLan           bool              `yaml:"allow-lan"`
+	Mode               string            `yaml:"mode"`
+	LogLevel           string            `yaml:"log-level"`
+	ExternalController string            `yaml:"external-controller"`
+	Proxies            []ClashProxy      `yaml:"proxies"`
+	ProxyGroups        []ClashProxyGroup `yaml:"proxy-groups"`
+	Rules              []string          `yaml:"rules"`
+}
+
+// ClashProxy represents a proxy configuration in clash
+type ClashProxy struct {
+	Name     string `yaml:"name"`
+	Type     string `yaml:"type"`
+	Server   string `yaml:"server"`
+	Port     int    `yaml:"port"`
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
+}
+
+// ClashProxyGroup represents a proxy group configuration
+type ClashProxyGroup struct {
+	Name    string   `yaml:"name"`
+	Type    string   `yaml:"type"`
+	Proxies []string `yaml:"proxies"`
+}
+
 // WebServer represents the Client web server
 type WebServer struct {
 	rateLimiter *ratelimit.RateLimiter
@@ -207,6 +240,9 @@ type WebServer struct {
 	authUsername   string
 	authPassword   string
 	sessionManager *SessionManager
+
+	// Configuration for clash profile generation
+	config *config.Config
 }
 
 // NewClientWebServer creates a new Client web server
@@ -226,6 +262,11 @@ func (cws *WebServer) SetAuth(enabled bool, username, password string) {
 	cws.authEnabled = enabled
 	cws.authUsername = username
 	cws.authPassword = password
+}
+
+// SetConfigurations sets all necessary configurations for clash profile generation
+func (cws *WebServer) SetConfigurations(cfg *config.Config) {
+	cws.config = cfg
 }
 
 // SetActualClientID adds a client ID to the tracked list
@@ -309,6 +350,7 @@ func (cws *WebServer) Start() error {
 
 	mux.HandleFunc("/api/status", protectedHandler(cws.handleStatus))
 	mux.HandleFunc("/api/metrics/connections", protectedHandler(cws.handleConnectionMetrics))
+	mux.HandleFunc("/api/clash/profile", protectedHandler(cws.handleClashProfile))
 
 	// Core APIs only - removed unnecessary config, rate limiting, health and diagnostics APIs
 
@@ -728,6 +770,228 @@ func (cws *WebServer) handleConnectionMetrics(w http.ResponseWriter, r *http.Req
 
 		cws.respondJSON(w, clientConnections)
 	}
+}
+
+// parseHostFromAddress extracts host from address, handling IPv6, schemes, etc.
+func (cws *WebServer) parseHostFromAddress(addr string) (string, error) {
+	// Remove common schemes
+	addr = strings.TrimPrefix(addr, "tcp://")
+	addr = strings.TrimPrefix(addr, "udp://")
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+
+	if addr == "" {
+		return "", fmt.Errorf("empty address")
+	}
+
+	// Handle IPv6 addresses in brackets like [::1]:8080
+	if strings.HasPrefix(addr, "[") {
+		closeBracket := strings.Index(addr, "]")
+		if closeBracket == -1 {
+			return "", fmt.Errorf("malformed IPv6 address: %s", addr)
+		}
+		return addr[1:closeBracket], nil
+	}
+
+	// Handle regular addresses
+	if strings.Contains(addr, ":") {
+		parts := strings.Split(addr, ":")
+		if len(parts) >= 2 && parts[0] != "" {
+			return parts[0], nil
+		}
+		// Handle cases like ":8080" (listen on all interfaces)
+		if parts[0] == "" {
+			return "127.0.0.1", nil
+		}
+	}
+
+	// If no port specified, return the whole address as host
+	return addr, nil
+}
+
+// parsePortFromAddress extracts port from address with proper validation
+func (cws *WebServer) parsePortFromAddress(addr string, defaultPort int) (int, error) {
+	// Remove common schemes
+	addr = strings.TrimPrefix(addr, "tcp://")
+	addr = strings.TrimPrefix(addr, "udp://")
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+
+	if addr == "" {
+		return defaultPort, nil
+	}
+
+	var portStr string
+
+	// Handle IPv6 addresses in brackets like [::1]:8080
+	if strings.HasPrefix(addr, "[") {
+		closeBracket := strings.Index(addr, "]")
+		if closeBracket == -1 {
+			return defaultPort, fmt.Errorf("malformed IPv6 address: %s", addr)
+		}
+		remainder := addr[closeBracket+1:]
+		if strings.HasPrefix(remainder, ":") {
+			portStr = remainder[1:]
+		}
+	} else {
+		// Handle regular addresses
+		parts := strings.Split(addr, ":")
+		if len(parts) >= 2 {
+			portStr = parts[len(parts)-1] // Get the last part as port
+		}
+	}
+
+	if portStr == "" {
+		return defaultPort, nil
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return defaultPort, fmt.Errorf("invalid port number: %s", portStr)
+	}
+
+	if port < 1 || port > 65535 {
+		return defaultPort, fmt.Errorf("port out of range (1-65535): %d", port)
+	}
+
+	return port, nil
+}
+
+// handleClashProfile handles clash profile requests
+func (cws *WebServer) handleClashProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if cws.config == nil {
+		logger.Warn("Clash profile requested but configuration not available")
+		http.Error(w, "Configuration not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse client gateway address to get correct host
+	gatewayAddr := cws.config.Client.Gateway.Addr
+	if gatewayAddr == "" {
+		logger.Error("Client gateway address is empty")
+		http.Error(w, "Gateway address not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	host, err := cws.parseHostFromAddress(gatewayAddr)
+	if err != nil {
+		logger.Error("Failed to parse gateway host", "addr", gatewayAddr, "err", err)
+		http.Error(w, "Invalid gateway address", http.StatusInternalServerError)
+		return
+	}
+
+	// Create clash profile
+	profile := ClashProfile{
+		Port:               7890, // Default clash HTTP proxy port
+		SocksPort:          7891, // Default clash SOCKS proxy port
+		AllowLan:           false,
+		Mode:               "rule",
+		LogLevel:           "info",
+		ExternalController: "127.0.0.1:9090",
+		Proxies:            []ClashProxy{},
+		ProxyGroups:        []ClashProxyGroup{},
+		Rules:              []string{},
+	}
+
+	// Add HTTP proxy if configured
+	if cws.config.Gateway.Proxy.HTTP.ListenAddr != "" {
+		httpPort, err := cws.parsePortFromAddress(cws.config.Gateway.Proxy.HTTP.ListenAddr, 8080)
+		if err != nil {
+			logger.Warn("Failed to parse HTTP proxy port, using default", "addr", cws.config.Gateway.Proxy.HTTP.ListenAddr, "err", err)
+			httpPort = 8080
+		}
+
+		httpProxy := ClashProxy{
+			Name:   "anyproxy-http",
+			Type:   "http",
+			Server: host,
+			Port:   httpPort,
+		}
+
+		// Add client group credentials for proxy auth
+		if cws.config.Client.GroupID != "" && cws.config.Client.GroupPassword != "" {
+			httpProxy.Username = cws.config.Client.GroupID
+			httpProxy.Password = cws.config.Client.GroupPassword
+		}
+
+		profile.Proxies = append(profile.Proxies, httpProxy)
+	}
+
+	// Add SOCKS5 proxy if configured
+	if cws.config.Gateway.Proxy.SOCKS5.ListenAddr != "" {
+		socks5Port, err := cws.parsePortFromAddress(cws.config.Gateway.Proxy.SOCKS5.ListenAddr, 1080)
+		if err != nil {
+			logger.Warn("Failed to parse SOCKS5 proxy port, using default", "addr", cws.config.Gateway.Proxy.SOCKS5.ListenAddr, "err", err)
+			socks5Port = 1080
+		}
+
+		socks5Proxy := ClashProxy{
+			Name:   "anyproxy-socks5",
+			Type:   "socks5",
+			Server: host,
+			Port:   socks5Port,
+		}
+
+		// Add client group credentials for proxy auth
+		if cws.config.Client.GroupID != "" && cws.config.Client.GroupPassword != "" {
+			socks5Proxy.Username = cws.config.Client.GroupID
+			socks5Proxy.Password = cws.config.Client.GroupPassword
+		}
+
+		profile.Proxies = append(profile.Proxies, socks5Proxy)
+	}
+
+	// Check if we have any proxies configured
+	if len(profile.Proxies) == 0 {
+		logger.Warn("No proxy services configured for clash profile")
+		http.Error(w, "No proxy services configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Create proxy groups
+	proxyNames := make([]string, len(profile.Proxies))
+	for i, proxy := range profile.Proxies {
+		proxyNames[i] = proxy.Name
+	}
+
+	// Add DIRECT option
+	proxyNames = append(proxyNames, "DIRECT")
+
+	profile.ProxyGroups = []ClashProxyGroup{
+		{
+			Name:    "PROXY",
+			Type:    "select",
+			Proxies: proxyNames,
+		},
+	}
+
+	// Add basic rules
+	profile.Rules = []string{
+		"DOMAIN-SUFFIX,local,DIRECT",
+		"IP-CIDR,127.0.0.0/8,DIRECT",
+		"IP-CIDR,172.16.0.0/12,DIRECT",
+		"IP-CIDR,192.168.0.0/16,DIRECT",
+		"IP-CIDR,10.0.0.0/8,DIRECT",
+		"MATCH,PROXY",
+	}
+
+	// Set YAML content type
+	w.Header().Set("Content-Type", "application/x-yaml")
+	w.Header().Set("Content-Disposition", "attachment; filename=clash-profile.yaml")
+
+	// Marshal as YAML and return
+	if err := yaml.NewEncoder(w).Encode(profile); err != nil {
+		logger.Error("Failed to encode clash profile", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Debug("Generated clash profile", "host", host, "proxies_count", len(profile.Proxies))
 }
 
 // Removed unnecessary config, rate limiting, health and diagnostics handlers to minimize code

@@ -59,6 +59,9 @@ func main() {
 			webServer.SetAuth(cfg.Client.Web.AuthEnabled, cfg.Client.Web.AuthUsername, cfg.Client.Web.AuthPassword)
 		}
 
+		// Set configurations for clash profile generation
+		webServer.SetConfigurations(cfg)
+
 		// Start web server in a separate goroutine
 		go func() {
 			if err := webServer.Start(); err != nil {

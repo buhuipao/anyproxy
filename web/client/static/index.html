@@ -93,8 +93,9 @@
         .table th { background: #f8f9fa; font-weight: 600; font-size: 0.85rem; }
         .status-active { background: #d4edda; color: #155724; padding: 4px 8px; border-radius: 15px; font-size: 0.8rem; }
         .status-warning { background: #fff3cd; color: #856404; padding: 4px 8px; border-radius: 15px; font-size: 0.8rem; }
-        .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+        .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; transition: all 0.3s ease; }
         .btn-primary { background: #2ecc71; color: white; }
+        .btn-primary:hover { background: #27ae60; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(46, 204, 113, 0.3); }
         .client-info {
             opacity: 0.9;
         }
@@ -145,6 +146,27 @@
             content: "🔄";
             margin-right: 8px;
         }
+        /* Small clash config button in header */
+        .btn-clash {
+            background: rgba(255,255,255,0.15);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.25);
+            padding: 8px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            opacity: 0.9;
+            min-width: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .btn-clash:hover {
+            background: rgba(255,255,255,0.25);
+            opacity: 1;
+            transform: translateY(-1px);
+        }
         .auto-refreshing {
             animation: pulse 2s infinite;
         }
@@ -170,6 +192,7 @@
                         </label>
                         <span class="refresh-status" id="refreshStatus">●</span>
                     </div>
+                    <button class="btn-clash" onclick="downloadClashConfig()" data-i18n-title="client.clash.download_tooltip" title="Download Clash Configuration">⬇️</button>
                     <button class="lang-switch" onclick="window.i18n.toggleLanguage()" data-i18n="common.language_switch">中文</button>
                     <div class="user-info" id="userInfo" style="display: none;">
                         <span><span data-i18n="client.welcome">Welcome, </span><span id="username"></span></span>
@@ -285,6 +308,35 @@
                 return;
             }
             console.error('API error:', error);
+        }
+
+        // Download clash configuration
+        async function downloadClashConfig() {
+            try {
+                const response = await fetch('/api/clash/profile');
+                if (!response.ok) {
+                    if (response.status === 503) {
+                        alert(window.i18n.t('client.clash.error_not_available') || 'Gateway configuration not available');
+                        return;
+                    }
+                    handleApiError(null, response);
+                    return;
+                }
+                
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = 'clash-config.yaml';
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            } catch (error) {
+                console.error('Failed to download clash config:', error);
+                alert(window.i18n.t('client.clash.error_download') || 'Failed to download clash configuration');
+            }
         }
 
         // Load status information
@@ -464,6 +516,16 @@
                 refreshAllData();
                 setupAutoRefresh();
             }
+            
+            // Ensure clash button tooltip is updated after i18n loads
+            setTimeout(() => {
+                if (window.i18n) {
+                    const clashBtn = document.querySelector('.btn-clash');
+                    if (clashBtn) {
+                        clashBtn.title = window.i18n.t('client.clash.download_tooltip');
+                    }
+                }
+            }, 100);
         });
     </script>
 </body>

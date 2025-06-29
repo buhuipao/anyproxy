@@ -52,6 +52,13 @@ class I18n {
             'client.connections.no_connections': 'No active connections',
             'client.status.gateway_status': 'Gateway Status',
 
+                // Clash Configuration
+                'client.clash.config_title': 'Clash Config',
+                'client.clash.download_config': 'Clash',
+                'client.clash.download_tooltip': 'Download Clash Configuration',
+                'client.clash.error_not_available': 'Gateway configuration not available',
+                'client.clash.error_download': 'Failed to download clash configuration',
+
                 // Health Check
                 'client.health.title': 'Health Check',
                 'client.health.check_item': 'Check Item',
@@ -141,6 +148,13 @@ class I18n {
                 'client.connections.no_connections': '暂无活跃连接',
                 'client.status.gateway_status': '网关状态',
 
+                // Clash Configuration
+                'client.clash.config_title': 'Clash 配置',
+                'client.clash.download_config': 'Clash',
+                'client.clash.download_tooltip': '下载 Clash 配置文件',
+                'client.clash.error_not_available': '网关配置不可用',
+                'client.clash.error_download': '下载 Clash 配置失败',
+
                 // Health Check
                 'client.health.title': '健康检查',
                 'client.health.check_item': '检查项',
@@ -225,6 +239,7 @@ class I18n {
         document.querySelectorAll('[data-i18n]').forEach(element => {
             const key = element.getAttribute('data-i18n');
             const paramsAttr = element.getAttribute('data-i18n-params');
+            const titleKey = element.getAttribute('data-i18n-title');
             let params = {};
             
             if (paramsAttr) {
@@ -240,6 +255,11 @@ class I18n {
             } else {
                 element.textContent = this.t(key, params);
             }
+            
+            // Handle title attribute translations
+            if (titleKey) {
+                element.title = this.t(titleKey, params);
+            }
         });
 
         // Update language switch button text
@@ -253,6 +273,12 @@ class I18n {
         this.currentLanguage = this.currentLanguage === 'en' ? 'zh' : 'en';
         localStorage.setItem('preferred-language', this.currentLanguage);
         this.applyTranslations();
+        
+        // Update clash button tooltip specifically
+        const clashBtn = document.querySelector('.btn-clash');
+        if (clashBtn) {
+            clashBtn.title = this.t('client.clash.download_tooltip');
+        }
     }
 
     formatBytes(bytes) {
