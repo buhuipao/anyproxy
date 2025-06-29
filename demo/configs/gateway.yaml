@@ -10,25 +10,21 @@ log:
   max_age: 30             
   compress: true          
 
-proxy:
-  socks5:
-    listen_addr: ":1080"
-    auth_username: "user"
-    auth_password: "password"
-  http:
-    listen_addr: ":8080"
-    auth_username: "user"
-    auth_password: "password"
-
-transport:
-  type: "grpc"
 
 gateway:
   listen_addr: ":8443"
+  transport_type: "grpc"
   tls_cert: "certs/server.crt"
   tls_key: "certs/server.key"
   auth_username: "gateway_user"
   auth_password: "gateway_password"
+  proxy:
+    socks5:
+      listen_addr: ":1080"
+    http:
+      listen_addr: ":8080"
+    tuic:
+      listen_addr: ":9443"
   web:
     enabled: true
     listen_addr: ":8090"

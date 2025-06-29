@@ -1,0 +1,184 @@
+# AnyProxy Complete Configuration Example
+# This configuration demonstrates all available features and options
+# including multiple transport protocols, proxy types, web management,
+# group-based routing, port forwarding, and security controls.
+
+---
+
+# Logging Configuration
+log:
+  level: "info"                    # debug, info, warn, error
+  format: "json"                   # text, json
+  output: "file"                   # stdout, stderr, file
+  file: "logs/anyproxy.log"        # log file path
+  max_size: 100                    # maximum log file size in MB
+  max_backups: 5                   # number of old log files to retain
+  max_age: 30                      # maximum days to retain log files
+  compress: true                   # compress rotated log files
+
+# Gateway Configuration (Public Server)
+gateway:
+  listen_addr: ":9091"             # Gateway listen address
+  transport_type: "quic"           # Transport: websocket, grpc, or quic
+  tls_cert: "certs/server.crt"     # TLS certificate for secure transport
+  tls_key: "certs/server.key"      # TLS private key
+  auth_username: "gateway_admin"   # Gateway authentication username
+  auth_password: "secure_gateway_password"  # Gateway authentication password
+  
+  # Proxy Protocols Configuration
+  proxy:
+    # HTTP Proxy (Standard web browsing)
+    http:
+      listen_addr: ":8080"         # HTTP proxy port
+    
+    # SOCKS5 Proxy (General purpose, low overhead)
+    socks5:
+      listen_addr: ":1080"         # SOCKS5 proxy port
+    
+    # TUIC Proxy (Ultra-low latency UDP-based)
+    tuic:
+      listen_addr: ":9443"         # TUIC proxy port (UDP)
+      # Note: TUIC uses gateway TLS cert/key and group-based authentication
+  
+  # Web Management Interface
+  web:
+    enabled: true                  # Enable web management interface
+    listen_addr: ":8090"           # Web interface port
+    static_dir: "web/gateway/static"  # Static files directory
+    auth_enabled: true             # Enable web authentication
+    auth_username: "admin"         # Web admin username
+    auth_password: "admin123"      # Web admin password
+    session_key: "change-this-secret-key"  # Session encryption key
+
+# Client Configuration (Private Network)
+client:
+  id: "production-client"          # Base client identifier
+  group_id: "prod-env"             # Group ID for routing, also is the proxy authentication username (important!)
+  group_password: "prod_secret"    # Group password for proxy authentication
+  replicas: 3                      # Number of client replicas
+  
+  # Gateway Connection Settings
+  gateway:
+    addr: "gateway.example.com:9091"      # Gateway address
+    transport_type: "quic"               # Must match gateway transport
+    tls_cert: "certs/server.crt"         # Gateway TLS certificate
+    auth_username: "gateway_admin"       # Gateway authentication
+    auth_password: "secure_gateway_password"
+  
+  # Security: Host Access Control
+  forbidden_hosts:
+    - "169.254.0.0/16"            # Cloud metadata services
+    - "127.0.0.0/8"               # Localhost addresses
+    - "10.0.0.0/8"                # Private networks
+    - "172.16.0.0/12"             # Private networks
+    - "192.168.0.0/16"            # Private networks
+    - "0.0.0.0"                   # Null address
+    - "::1"                       # IPv6 localhost
+    - "kubernetes.default.svc"    # Kubernetes internal
+  
+  # Security: Allowed Services (explicit whitelist)
+  allowed_hosts:
+    - "api.production.com:443"    # Production API
+    - "database.internal:5432"    # Internal database
+    - "redis.cache:6379"          # Redis cache
+    - "elasticsearch.search:9200" # Search service
+    - ".*\\.trusted\\.com:.*"     # Trusted domain pattern
+    - "localhost:22"              # SSH access
+    - "localhost:3000"            # Development server
+  
+  # Port Forwarding Configuration
+  open_ports:
+    # SSH Access
+    - remote_port: 2222           # Gateway opens port 2222
+      local_port: 22              # Forward to local SSH
+      local_host: "localhost"
+      protocol: "tcp"
+    
+    # Database Access
+    - remote_port: 5432           # Gateway opens port 5432
+      local_port: 5432            # Forward to database
+      local_host: "database.internal"
+      protocol: "tcp"
+    
+    # Redis Access
+    - remote_port: 6379           # Gateway opens port 6379
+      local_port: 6379            # Forward to Redis
+      local_host: "redis.cache"
+      protocol: "tcp"
+    
+    # Development Server
+    - remote_port: 8000           # Gateway opens port 8000
+      local_port: 3000            # Forward to dev server
+      local_host: "localhost"
+      protocol: "tcp"
+    
+    # UDP Service Example
+    - remote_port: 9053           # Gateway opens UDP port 9053
+      local_port: 53              # Forward to local DNS
+      local_host: "localhost"
+      protocol: "udp"
+  
+  # Client Web Interface
+  web:
+    enabled: true                 # Enable client web interface
+    listen_addr: ":8091"          # Client web interface port
+    static_dir: "web/client/static"  # Static files directory
+    auth_enabled: false           # Optional: enable authentication
+    auth_username: "client_admin" # Web username (if auth enabled)
+    auth_password: "client123"    # Web password (if auth enabled)
+    session_key: "client-session-secret"  # Session key (if auth enabled)
+
+---
+
+# Usage Examples:
+
+# 1. HTTP Proxy with Group Authentication:
+#    curl -x http://prod-env:prod_secret@gateway.example.com:8080 https://api.production.com
+
+# 2. SOCKS5 Proxy with Group Authentication:
+#    curl --socks5 prod-env:prod_secret@gateway.example.com:1080 https://database.internal:5432
+
+# 3. Direct Port Access:
+#    ssh -p 2222 user@gateway.example.com
+#    psql -h gateway.example.com -p 5432 production_db
+
+# 4. TUIC Proxy (requires TUIC-compatible client):
+#    tuic://prod_secret@gateway.example.com:9443?uuid=prod-env
+
+# 5. Web Management:
+#    Gateway: https://gateway.example.com:8090 (admin / admin123)
+#    Client:  http://localhost:8091 (no auth by default)
+
+# Transport Protocol Selection Guide:
+#
+# WebSocket (port 8443):
+# - Best for: Firewall compatibility, HTTP/HTTPS environments
+# - Features: Wide browser support, HTTP upgrade, good performance
+#
+# gRPC (port 9090):  
+# - Best for: High performance, server-to-server communication
+# - Features: HTTP/2 multiplexing, efficient binary protocol, streaming
+#
+# QUIC (port 9091):
+# - Best for: Mobile networks, unstable connections, ultra-low latency
+# - Features: 0-RTT handshake, connection migration, built-in TLS 1.3
+
+# Group Authentication Important Notes:
+#
+# 1. Proxy Authentication: Use group_id directly as username and group_password as password
+#    Example: curl -x http://prod-env:password@gateway:8080 http://target
+#
+# 2. Group Routing: Gateway routes traffic based on the authenticated group_id
+#
+# 3. Password Consistency: All clients with the same group_id must use identical group_password
+#
+# 4. Simple Format: No complex username.group_id format - just group_id and group_password
+
+# Security Best Practices:
+# - Use strong passwords for all authentication
+# - Restrict allowed_hosts to specific services only  
+# - Enable TLS for all transport protocols
+# - Regularly rotate certificates and passwords
+# - Monitor web interface access logs
+# - Use firewall rules to restrict management port access
+# - Keep group_password secure as it's used for proxy authentication 

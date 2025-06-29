@@ -6,62 +6,65 @@
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)]()
 [![Release](https://img.shields.io/github/v/release/buhuipao/anyproxy)](https://github.com/buhuipao/anyproxy/releases)
 
-AnyProxy is a secure tunneling solution that enables you to expose local services to the internet through multiple transport protocols. Built with a modular architecture supporting WebSocket, gRPC, and QUIC transports with end-to-end TLS encryption.
+AnyProxy is a modern secure tunneling solution that enables you to safely expose local services to the internet through multiple transport protocols. Built with integrated web management interfaces and intelligent monitoring systems.
 
-## 🚀 Try Demo
+## 🚀 30-Second Demo Experience
 
-**Want to test AnyProxy in 30 seconds?** Try our demo client:
+**Want to quickly experience AnyProxy?** Try our demo client:
 
 ```bash
-cd demo && docker run -d \
+# 1. Enter demo directory
+cd demo
+
+# 2. Start demo client (connects to our demo gateway)
+# Demo includes pre-generated certificate files
+docker run -d \
   --name anyproxy-demo-client \
   --network host \
   -v $(pwd)/configs:/app/configs:ro \
   -v $(pwd)/certs:/app/certs:ro \
   buhuipao/anyproxy:latest \
   ./anyproxy-client --config configs/client.yaml
+
+# 3. Check running status
+docker logs anyproxy-demo-client
+
+# 4. Access Web Interface
+# http://localhost:8091 (see config file for username/password)
 ```
 
-🌐 **Web Interface**: http://localhost:8091 (admin / admin123)
+**Test proxy connection:**
+```bash
+# Test with demo proxy (replace group_id with value from config)
+curl -x http://your_group_id:your_password@47.107.181.88:8080 http://httpbin.org/ip
+```
 
-📖 **Complete Demo Guide**: See [demo/README.md](demo/README.md) for detailed instructions.
-
-## 📑 Table of Contents
-
-- [Try Demo](#-try-demo)
-- [Key Features](#-key-features)
-- [Architecture Overview](#️-architecture-overview)
-- [Quick Start](#-quick-start)
-- [Common Use Cases](#-common-use-cases)
-- [Configuration](#️-configuration)
-- [Web Management Interface](#-web-management-interface)
-- [Docker Deployment](#-docker-deployment)
-- [Security](#-security)
-- [Troubleshooting](#-troubleshooting)
-- [Integration](#-integration)
-- [Contributing](#-contributing)
-- [License](#-license)
+📖 **Complete Demo Guide**: See [demo/README.md](demo/README.md) for detailed instructions
 
 ## ✨ Key Features
 
-- 🔄 **Multiple Transport Protocols**: Choose between WebSocket, gRPC, or QUIC
-- 🔐 **End-to-End TLS Encryption**: Secure communication for all protocols  
-- 🚀 **Triple Proxy Support**: HTTP/HTTPS, SOCKS5, and TUIC proxies
-  - **HTTP Proxy**: Standard web browsing and API access
-  - **SOCKS5 Proxy**: Universal protocol support with low overhead  
-  - **TUIC Proxy**: Ultra-low latency UDP-based proxy with 0-RTT handshake
-- 🎯 **Group-Based Routing**: Route traffic to specific client groups
-- ⚡ **Port Forwarding**: Direct port mapping for services
-- 🌐 **Cross-Platform**: Linux, macOS, Windows support
-- 🐳 **Container Ready**: Official Docker images available
-- 🖥️ **Web Management Interface**: Real-time monitoring and configuration
-- ⚙️ **Rate Limiting**: Per-client and global traffic control
-- 🌍 **Multi-Language Support**: English and Chinese web interface
-- 📊 **Real-time Monitoring**: Connection metrics and performance analytics
+### 🔄 Multiple Transport Protocols
+- **WebSocket**: Firewall-friendly, HTTP/HTTPS compatible
+- **gRPC**: HTTP/2 multiplexing, efficient binary protocol
+- **QUIC**: Ultra-low latency, 0-RTT handshake, connection migration
 
-## 🏗️ Architecture Overview
+### 🚀 Triple Proxy Support
+- **HTTP Proxy**: Standard HTTP CONNECT, full browser compatibility
+- **SOCKS5 Proxy**: Universal protocol support, low overhead
+- **TUIC Proxy**: UDP-based ultra-low latency proxy, 0-RTT connection
 
-### System Architecture
+### 🎯 Intelligent Routing & Security
+- **Group Routing System**: Multi-environment routing based on `group_id`
+- **Dynamic Authentication**: Clients authenticate using `group_id` and `group_password`
+- **Host Access Control**: Precise allow/deny lists
+- **End-to-End TLS**: Mandatory encryption for all transport protocols
+
+### 🖥️ Web Management Interface
+- **Gateway Dashboard**: Real-time monitoring, client management
+- **Client Monitoring**: Local connection tracking, performance analytics
+- **Multi-Language Support**: Complete English/Chinese bilingual interface
+
+## 🏗️ System Architecture
 
 ```
 Internet Users                       Public Gateway Server                   Private Networks
@@ -74,6 +77,7 @@ Internet Users                       Public Gateway Server                   Pri
      │                                 │ • TUIC:9443 │                       │ • Databases  │
      │                                 │ • Web:8090  │                       │ • AI Models  │
      │                                 │             │                       │ • Web:8091   │
+     │                                 │             │                       │              │
      │                                 │ Transports: │                       │              │
      │                                 │ • WS:8443   │                       │              │
      │                                 │ • gRPC:9090 │                       │              │
@@ -83,211 +87,146 @@ Internet Users                       Public Gateway Server                   Pri
 SSH, Web, AI ←────────────────── Secure Proxy Connection ──────────────→ Local Services
 ```
 
-### Transport Protocols Comparison
-
-| Transport | Best For | Key Benefits | Port |
-|-----------|----------|--------------|------|
-| **WebSocket** | Firewall compatibility | • Works through most firewalls<br>• HTTP/HTTPS compatible<br>• Wide browser support | 8443 |
-| **gRPC** | High performance | • HTTP/2 multiplexing<br>• Efficient binary protocol<br>• Built-in load balancing | 9090 |
-| **QUIC** | Mobile/unreliable networks | • Ultra-low latency<br>• 0-RTT handshake<br>• Connection migration | 9091 |
-
-### Proxy Protocols Comparison
-
-| Protocol | Type | Best For | Key Features | Port |
-|----------|------|----------|--------------|------|
-| **HTTP** | TCP | Web browsing, API calls | • Standard HTTP CONNECT<br>• Compatible with all browsers<br>• Simple authentication | 8080 |
-| **SOCKS5** | TCP | General purpose | • Protocol agnostic<br>• Low overhead<br>• Wide client support | 1080 |
-| **TUIC** | UDP | Gaming, real-time apps | • 0-RTT connection setup<br>• Built-in multiplexing<br>• Connection migration<br>• TLS 1.3 required | 9443 |
-
-**Note**: Each Gateway/Client instance uses only ONE transport protocol.
-
-### Group-Based Routing Architecture
+### Group-Based Routing Principle
 
 ```
                               Gateway Server
                           ┌─────────────────────┐
-  User Requests           │   Route by Group    │           Client Groups
+  Proxy Auth Requests     │   Route by Group    │           Client Groups
        │                  │                     │                │
-       ├─ user.prod ────► │  ┌─────────────┐    │ ────► ┌─────────────────┐
+       ├─ prod:pass ────► │  ┌─────────────┐    │ ────► ┌─────────────────┐
        │                  │  │  Prod Group │    │       │  Production Env │
        │                  │  │   Router    │    │       │ • prod-api.com  │
        │                  │  └─────────────┘    │       │ • prod-db:5432  │
        │                  │                     │       └─────────────────┘
-       ├─ user.staging ──►│  ┌─────────────┐    │ ────► ┌─────────────────┐
+       ├─ staging:pass ──►│  ┌─────────────┐    │ ────► ┌─────────────────┐
        │                  │  │ Staging     │    │       │  Staging Env    │
        │                  │  │  Router     │    │       │ • staging-api   │
        │                  │  └─────────────┘    │       │ • staging-db    │
        │                  │                     │       └─────────────────┘
-       └─ user.dev ──────►│  ┌─────────────┐    │ ────► ┌─────────────────┐
+       └─ dev:pass ──────►│  ┌─────────────┐    │ ────► ┌─────────────────┐
                           │  │   Dev       │    │       │  Development    │
                           │  │  Router     │    │       │ • localhost:*   │
                           │  └─────────────┘    │       │ • dev-services  │
                           └─────────────────────┘       └─────────────────┘
 
-Usage Examples:
-• curl -x http://user.prod:pass@gateway:8080 https://prod-api.com
-• curl -x http://user.staging:pass@gateway:8080 https://staging-api.com  
-• curl -x http://user.dev:pass@gateway:8080 http://localhost:3000
-
-⚠️ **Critical Group Routing Rules**:
-• **With group_id**: Use `username.group_id` format in proxy authentication
-• **Without group_id**: Use `username` only - routes to default group
-• **Wrong group_id**: Invalid group_id also routes to default group
-• **Missing group_id**: Client without group_id joins default group
+⚠️ **Critical Authentication Rules**:
+• **Proxy Authentication**: Use `group_id` as username, `group_password` as password
+• **Routing Mechanism**: Gateway routes traffic to corresponding client group based on authenticated `group_id`
+• **Each Client**: Registers with unique `group_id` and `group_password`
+• **Password Consistency**: All clients with the same `group_id` must use identical `group_password`, or authentication will fail
 ```
 
-### Port Forward Architecture
+## 📊 Protocol Comparison
 
-```
-Internet Access                Gateway Server               Target Services
-      │                    ┌──────────────────┐                   │
-      │                    │  Port Mappings   │                   │
-      ├─ SSH :2222 ──────► │ 2222 → Client A  │─────────────► SSH:22
-      │                    │                  │                   │
-      ├─ HTTP :8000 ─────► │ 8000 → Client B  │─────────────► Web:80
-      │                    │                  │                   │ 
-      ├─ DB :5432 ───────► │ 5432 → Client C  │─────────────► PostgreSQL :5432
-      │                    │                  │                   │
-      └─ API :3000 ──────► │ 3000 → Client D  │─────────────► API Server :3000
-                           └──────────────────┘
+| Protocol | Type | Best For | Port | Authentication |
+|----------|------|----------|------|---------------|
+| **HTTP** | TCP | Web browsing, API calls | 8080 | group_id/group_password |
+| **SOCKS5** | TCP | General purpose | 1080 | group_id/group_password |
+| **TUIC** | UDP | Gaming, real-time apps | 9443 | Dynamic Group Auth |
 
-Configuration Example:
-open_ports:
-  - remote_port: 2222    # Gateway listens on :2222
-    local_port: 22       # Forward to client's SSH :22
-    local_host: "localhost"
-    protocol: "tcp"
-    
-  - remote_port: 5432    # Gateway listens on :5432  
-    local_port: 5432     # Forward to internal database
-    local_host: "database.internal"
-    protocol: "tcp"
-
-Access: ssh -p 2222 user@gateway.example.com
-       psql -h gateway.example.com -p 5432 mydb
-```
+**Important Notes**: 
+- Each Gateway/Client instance uses only ONE transport protocol
+- TUIC protocol simplified: uses `group_id` as UUID, `group_password` as Token
+- All proxy protocols authenticate directly using `group_id` for routing
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Core Concepts
 
-- **Public Server** for Gateway deployment (with public IP)
-- **Private Network** with services you want to expose
-- Docker installed on both environments
+AnyProxy operates on a **group authentication** model:
+- **Gateway**: Provides proxy services, accepts client connections
+- **Client**: Connects to gateway, provides access to internal services
+- **Group Authentication**: Each client belongs to a group (`group_id`) and authenticates using group password (`group_password`)
 
-### Step 1: Deploy Gateway (Public Server)
+### Requirements
 
+- **Docker** (recommended) or **Go 1.23+**
+- **Public Server** for Gateway deployment
+- **TLS Certificates** (required for transport layer security)
+
+### Quick Deployment
+
+⚠️ **Important Notes**:
+- **Certificates Required**: All Gateway and Client instances need TLS certificates for secure communication
+- **Password Consistency**: All clients with the same `group_id` must use identical `group_password`
+- **UDP Ports**: When using QUIC transport or TUIC proxy, Docker ports must be set as UDP type
+
+**1. Start Gateway (Public Server):**
 ```bash
-# On your public server (e.g., VPS, Cloud instance)
+# Create directories and configuration
 mkdir anyproxy-gateway && cd anyproxy-gateway
 mkdir -p configs certs logs
-```
 
-**Gateway Configuration:**
-```bash
+# Generate TLS certificates (required step)
+# Use your public IP or domain name
+./scripts/generate_certs.sh YOUR_GATEWAY_IP
+# or for domain: ./scripts/generate_certs.sh gateway.yourdomain.com
+
+# Create gateway configuration
 cat > configs/gateway.yaml << 'EOF'
-log:
-  level: "info"
-  format: "json"
-  output: "file"
-  file: "logs/gateway.log"
-
-transport:
-  type: "websocket"  # Choose: websocket, grpc, or quic
-
-proxy:
-  http:
-    listen_addr: ":8080"
-    auth_username: "proxy_user"
-    auth_password: "secure_proxy_password"
-  socks5:
-    listen_addr: ":1080"
-    auth_username: "socks_user"
-    auth_password: "secure_socks_password"
-  tuic:
-    listen_addr: ":9443"
-    token: "your-tuic-token-here"
-    uuid: "12345678-1234-5678-9abc-123456789abc"
-    cert_file: "certs/server.crt"
-    key_file: "certs/server.key"
-
 gateway:
-  listen_addr: ":8443"  # WebSocket port (use :9090 for gRPC, :9091 for QUIC)
+  listen_addr: ":8443"
+  transport_type: "websocket"
   tls_cert: "certs/server.crt"
   tls_key: "certs/server.key"
-  auth_username: "gateway_admin"
-  auth_password: "very_secure_gateway_password"
+  auth_username: "admin"
+  auth_password: "secure_password"
+  proxy:
+    http:
+      listen_addr: ":8080"
+    socks5:
+      listen_addr: ":1080"
+    tuic:
+      listen_addr: ":9443"
   web:
     enabled: true
     listen_addr: ":8090"
+    static_dir: "web/gateway/static"
     auth_enabled: true
-    auth_username: "admin"
-    auth_password: "admin123"
+    auth_username: "web_admin"
+    auth_password: "web_password"
+    session_key: "change-this-secret-key"
 EOF
-```
 
-**Generate Certificates & Start:**
-
-> ⚠️ **Certificate Important Note**: The Docker image includes a pre-generated test certificate that **ONLY works for localhost testing**. For remote gateway deployment, you **MUST** generate certificates with the correct IP address or domain name using the provided script.
-
-```bash
-# For Remote Gateway: Generate certificate with your public IP/domain (REQUIRED)
-./scripts/generate_certs.sh YOUR_PUBLIC_IP
-# or for domain:
-./scripts/generate_certs.sh gateway.yourdomain.com
-
-# Start gateway with generated certificate
+# Start gateway (WebSocket transport)
 docker run -d --name anyproxy-gateway \
-  --restart unless-stopped \
   -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
   -v $(pwd)/configs:/app/configs:ro \
   -v $(pwd)/certs:/app/certs:ro \
   -v $(pwd)/logs:/app/logs \
   buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
 
-# For Local Testing ONLY: Use built-in test certificate (localhost only)
-docker run -d --name anyproxy-gateway \
-  --restart unless-stopped \
-  -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 8443:8443 -p 8090:8090 \
-  -v $(pwd)/configs:/app/configs:ro \
-  -v $(pwd)/logs:/app/logs \
-  buhuipao/anyproxy:latest ./anyproxy-gateway --config configs/gateway.yaml
+# If using QUIC transport, ports need to be set as UDP:
+# docker run -d --name anyproxy-gateway \
+#   -p 8080:8080 -p 1080:1080 -p 9443:9443/udp -p 9091:9091/udp -p 8090:8090 \
+#   ...
 ```
 
-### Step 2: Deploy Client (Private Network)
-
+**2. Start Client (Private Network):**
 ```bash
-# On your private network machine
+# Create directories and configuration
 mkdir anyproxy-client && cd anyproxy-client
 mkdir -p configs certs logs
 
-# Copy server certificate from gateway server (REQUIRED for remote gateway)
-# For remote gateway: scp user@gateway-server:/path/to/anyproxy-gateway/certs/server.crt ./certs/
-# For localhost testing: You can use the built-in certificate (skip copy)
-```
+# Copy certificate files from gateway server (required)
+scp user@YOUR_GATEWAY_IP:/path/to/anyproxy-gateway/certs/server.crt ./certs/
 
-**Client Configuration:**
-```bash
+# Create client configuration
 cat > configs/client.yaml << 'EOF'
-log:
-  level: "info"
-  format: "json"
-  output: "file"
-  file: "logs/client.log"
-
-transport:
-  type: "websocket"  # Must match gateway transport
-
 client:
-  gateway_addr: "YOUR_PUBLIC_SERVER_IP:8443"  # Replace with your gateway IP
-  gateway_tls_cert: "certs/server.crt"       # Use built-in cert or your own
-  client_id: "home-client-001"
+  id: "home-client-001"
   group_id: "homelab"
+  group_password: "my_secure_password"  # Ensure all clients in same group use identical password
   replicas: 1
-  auth_username: "gateway_admin"
-  auth_password: "very_secure_gateway_password"
+  gateway:
+    addr: "YOUR_GATEWAY_IP:8443"  # Replace with your gateway IP
+    transport_type: "websocket"
+    tls_cert: "certs/server.crt"
+    auth_username: "admin"
+    auth_password: "secure_password"
   
-  # Security: Only allow specific local services
+  # Allow only specific services
   allowed_hosts:
     - "localhost:22"        # SSH
     - "localhost:80"        # Web server
@@ -296,499 +235,228 @@ client:
   # Block dangerous hosts
   forbidden_hosts:
     - "169.254.0.0/16"      # Cloud metadata
-    - "127.0.0.1"           # Localhost
-    - "0.0.0.0"
     
-  # Optional: Port forwarding
+  web:
+    enabled: true
+    listen_addr: ":8091"
+    static_dir: "web/client/static"
+    auth_enabled: true
+    auth_username: "client_admin"
+    auth_password: "client_password"
+    session_key: "change-this-secret-key"
+EOF
+
+# Start client (must mount certificate directory)
+docker run -d --name anyproxy-client \
+  --network host \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/certs:/app/certs:ro \
+  -v $(pwd)/logs:/app/logs \
+  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
+```
+
+**3. Test Connection:**
+```bash
+# HTTP proxy example (using group_id authentication)
+curl -x http://homelab:my_secure_password@YOUR_GATEWAY_IP:8080 http://localhost:80
+
+# SOCKS5 proxy example
+curl --socks5 homelab:my_secure_password@YOUR_GATEWAY_IP:1080 http://localhost:22
+
+# SSH access
+ssh -o "ProxyCommand=nc -X 5 -x homelab:my_secure_password@YOUR_GATEWAY_IP:1080 %h %p" user@localhost
+```
+
+## 🎯 Common Use Cases
+
+### 1. HTTP Proxy (Web Browsing)
+
+**Browser Setup:**
+```
+Proxy Server: YOUR_GATEWAY_IP
+HTTP Port: 8080
+Username: group_id          # e.g., homelab
+Password: group_password    # Group password
+```
+
+### 2. SOCKS5 Proxy (Universal Protocol)
+
+**SOCKS5 Configuration:**
+```
+Proxy Type: SOCKS5
+Server: YOUR_GATEWAY_IP
+Port: 1080
+Username: group_id          # e.g., homelab
+Password: group_password    # Group password
+```
+
+### 3. SSH Server Access
+
+```bash
+# Connect via SOCKS5 proxy
+ssh -o "ProxyCommand=nc -X 5 -x group_id:group_password@YOUR_GATEWAY_IP:1080 %h %p" user@localhost
+
+# Or configure SSH client
+cat >> ~/.ssh/config << 'EOF'
+Host tunnel-ssh
+  HostName localhost
+  User your_username
+  Port 22
+  ProxyCommand nc -X 5 -x group_id:group_password@YOUR_GATEWAY_IP:1080 %h %p
+EOF
+
+ssh tunnel-ssh
+```
+
+### 4. Port Forwarding
+
+**Configure Port Forwarding:**
+```yaml
+client:
   open_ports:
     - remote_port: 2222     # Gateway port
       local_port: 22        # Local SSH port
       local_host: "localhost"
       protocol: "tcp"
       
-  web:
-    enabled: true
-    listen_addr: ":8091"
-EOF
+    - remote_port: 8000     # Gateway port
+      local_port: 80        # Local web port
+      local_host: "localhost"
+      protocol: "tcp"
 ```
 
-**Start Client:**
+**Use Port Forwarding:**
 ```bash
-# For Remote Gateway: Use certificates from gateway server (REQUIRED)
-docker run -d --name anyproxy-client \
-  --restart unless-stopped \
-  --network host \
-  -v $(pwd)/configs:/app/configs:ro \
-  -v $(pwd)/certs:/app/certs:ro \
-  -v $(pwd)/logs:/app/logs \
-  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
+# Direct SSH connection
+ssh -p 2222 user@YOUR_GATEWAY_IP
 
-# For Local Testing ONLY: Use built-in test certificate (localhost only)
-docker run -d --name anyproxy-client \
-  --restart unless-stopped \
-  --network host \
-  -v $(pwd)/configs:/app/configs:ro \
-  -v $(pwd)/logs:/app/logs \
-  buhuipao/anyproxy:latest ./anyproxy-client --config configs/client.yaml
+# Direct web access
+curl http://YOUR_GATEWAY_IP:8000
 ```
-
-### Step 3: Test Connection
-
-⚠️ **Group-Based Routing Important**: If you set a `group_id` in your client config, you **MUST** use the format `username.group_id` in proxy authentication. Otherwise, traffic will route to the default group.
-
-```bash
-# Test HTTP proxy (with group_id - REQUIRED format)
-curl -x http://proxy_user.homelab:secure_proxy_password@YOUR_PUBLIC_SERVER_IP:8080 \
-  http://localhost:80
-
-# Test SOCKS5 proxy (with group_id - REQUIRED format)
-curl --socks5 socks_user.homelab:secure_socks_password@YOUR_PUBLIC_SERVER_IP:1080 \
-  http://localhost:22
-
-# Without group_id (goes to default group)
-curl -x http://proxy_user:secure_proxy_password@YOUR_PUBLIC_SERVER_IP:8080 \
-  http://localhost:80
-
-# Test TUIC proxy (requires TUIC-compatible client)
-# Use TUIC client with: tuic://your-tuic-token@YOUR_PUBLIC_SERVER_IP:9443?uuid=12345678-1234-5678-9abc-123456789abc
-
-# Test port forwarding (if configured)
-ssh -p 2222 user@YOUR_PUBLIC_SERVER_IP
-```
-
-## 🎯 Common Use Cases
-
-### 1. SSH Server Access
-
-**Quick SSH Setup:**
-```bash
-# Gateway: Standard setup with SOCKS5
-# Client: Allow SSH only
-cat > configs/ssh-client.yaml << 'EOF'
-transport:
-  type: "websocket"
-
-client:
-  gateway_addr: "YOUR_GATEWAY_IP:8443"
-  gateway_tls_cert: "certs/server.crt"
-  client_id: "ssh-client"
-  group_id: "ssh"
-  replicas: 1
-  auth_username: "gateway_admin"
-  auth_password: "very_secure_gateway_password"
-  allowed_hosts:
-    - "localhost:22"
-  forbidden_hosts:
-    - "169.254.0.0/16"
-EOF
-
-# Connect via SSH (with group_id)
-ssh -o "ProxyCommand=nc -X 5 -x socks_user.ssh:secure_socks_password@YOUR_GATEWAY_IP:1080 %h %p" user@localhost
-```
-
-### 2. Web Development
-
-**Development Server Access:**
-```bash
-# Use QUIC for better performance
-transport:
-  type: "quic"
-
-gateway:
-  listen_addr: ":9091"  # QUIC port
-
-client:
-  gateway_addr: "YOUR_GATEWAY_IP:9091"
-  allowed_hosts:
-    - "localhost:*"
-    - "127.0.0.1:*"
-
-# Access local dev servers (replace 'dev' with your group_id)
-curl -x http://proxy_user.dev:secure_proxy_password@YOUR_GATEWAY_IP:8080 http://localhost:3000
-```
-
-### 3. Database Access
-
-**Database Tunnel Setup:**
-```bash
-# Use port forwarding for direct database access
-open_ports:
-  - remote_port: 5432
-    local_port: 5432
-    local_host: "database.internal"
-    protocol: "tcp"
-
-# Connect directly
-psql -h YOUR_GATEWAY_IP -p 5432 -U postgres mydb
-```
-
-### 4. TUIC Proxy (Ultra-Low Latency)
-
-**TUIC Setup for 0-RTT Performance:**
-```bash
-# Gateway: Enable TUIC proxy in configuration
-proxy:
-  tuic:
-    listen_addr: ":9443"
-    token: "your-secure-token"
-    uuid: "12345678-1234-5678-9abc-123456789abc"
-    cert_file: "certs/server.crt"
-    key_file: "certs/server.key"
-
-# TUIC provides:
-# - 0-RTT connection establishment
-# - Built-in UDP and TCP multiplexing
-# - Optimal for mobile networks
-# - Enhanced connection migration
-
-# Client usage (with TUIC-compatible clients):
-# tuic://your-secure-token@YOUR_GATEWAY_IP:9443?uuid=12345678-1234-5678-9abc-123456789abc
-```
-
-**TUIC is ideal for:**
-- **Gaming Applications**: Minimal latency for real-time gaming
-- **Video Streaming**: Smooth streaming with connection migration
-- **Mobile Networks**: Handles network switching seamlessly
-- **IoT Devices**: Efficient for frequent short-lived connections
-- **Real-time Communications**: VoIP, video calls, live chat
-
-**Performance Benefits:**
-- **0-RTT Handshake**: Connect instantly without round-trip delays
-- **Connection Migration**: Maintain connections when switching networks
-- **Multiplexing**: Multiple data streams over single UDP connection
-- **TLS 1.3**: Modern encryption with perfect forward secrecy
 
 ## ⚙️ Configuration
 
 ### Transport Selection
 
-**Choose ONE transport per Gateway/Client pair:**
-
 ```yaml
-# WebSocket (Recommended for most cases)
-transport:
-  type: "websocket"
+# WebSocket (Recommended, firewall-friendly)
 gateway:
   listen_addr: ":8443"
+  transport_type: "websocket"
+  
+# Docker ports: -p 8443:8443
 
 # gRPC (High performance)
-transport:
-  type: "grpc"
 gateway:
   listen_addr: ":9090"
+  transport_type: "grpc"
+  
+# Docker ports: -p 9090:9090
 
-# QUIC (Mobile/unstable networks)
-transport:
-  type: "quic"
+# QUIC (Mobile-optimized) ⚠️ Note: Requires UDP ports
 gateway:
   listen_addr: ":9091"
+  transport_type: "quic"
+  
+# Docker ports: -p 9091:9091/udp (note the /udp suffix)
 ```
-
-### TUIC Proxy Configuration
-
-```yaml
-proxy:
-  tuic:
-    listen_addr: ":9443"               # UDP port for TUIC
-    token: "your-tuic-token"           # TUIC protocol token
-    uuid: "12345678-1234-5678-9abc-123456789abc"  # TUIC client UUID
-    cert_file: "certs/server.crt"      # TLS certificate (required)
-    key_file: "certs/server.key"       # TLS private key (required)
-```
-
-**TUIC Protocol Features:**
-- **0-RTT Handshake**: Ultra-fast connection establishment
-- **UDP-Based**: Built on QUIC for optimal performance
-- **TLS 1.3 Required**: Mandatory encryption
-- **Multiplexing**: Multiple streams over single connection
-- **Connection Migration**: Seamless network switching
 
 ### Security Configuration
 
 ```yaml
 client:
-  # Block dangerous hosts
+  # Allowed hosts (whitelist)
+  allowed_hosts:
+    - "localhost:22"
+    - "localhost:80"
+    - "192.168.1.0/24:*"
+    
+  # Forbidden hosts (blacklist)
   forbidden_hosts:
     - "169.254.0.0/16"      # Cloud metadata
     - "127.0.0.1"           # Localhost
     - "10.0.0.0/8"          # Private networks
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
-  
-  # Only allow specific services
-  allowed_hosts:
-    - "localhost:22"        # SSH only
-    - "localhost:80"        # HTTP only
-    - "localhost:443"       # HTTPS only
 ```
 
-### Rate Limiting Configuration
+### Certificate Generation
 
-```yaml
-# Global rate limiting
-rate_limiting:
-  enabled: true
-  global_limit: 1000      # requests per minute
-  per_client_limit: 100   # requests per minute per client
-  bandwidth_limit: 10     # MB/s per client
+```bash
+# Use the project's script to generate certificates
+./scripts/generate_certs.sh YOUR_GATEWAY_IP
+
+# Or use domain name
+./scripts/generate_certs.sh gateway.yourdomain.com
+
+# Certificate files will be generated in certs/ directory:
+# - certs/server.crt (certificate file)
+# - certs/server.key (private key file)
 ```
 
 ## 🖥️ Web Management Interface
 
-AnyProxy provides comprehensive web-based management interfaces with session-based authentication, real-time monitoring, and intelligent metrics collection.
-
 ### Gateway Dashboard
+- **Access**: `http://YOUR_GATEWAY_IP:8090`
+- **Authentication**: Use `gateway.web.auth_username` and `gateway.web.auth_password` from config file
+- **Features**: Real-time monitoring, client management, connection statistics
 
-**Access**: `http://YOUR_GATEWAY_IP:8090`
-**Credentials**: admin / admin123
+### Client Monitoring Interface
+- **Access**: `http://CLIENT_IP:8091`
+- **Authentication**: Use `client.web.auth_username` and `client.web.auth_password` from config file
+- **Features**: Local connection monitoring, performance analytics
 
-**Features:**
-- 📊 **Real-time Metrics**: Active connections, data transfer, success rates with automatic cleanup
-- 👥 **Client Management**: View all connected clients with online/offline detection
-- 🌍 **Multi-language**: Complete English/Chinese bilingual interface with persistent preferences
-- 🔄 **Auto-refresh**: 10-second configurable real-time data updates
-- 🔐 **Session Authentication**: 24-hour secure sessions with automatic renewal
-- 📈 **Memory-based Analytics**: Lightweight metrics with automatic inconsistency detection
-
-### Client Dashboard
-
-**Access**: `http://YOUR_CLIENT_IP:8091`
-**Authentication**: Optional (configurable)
-
-**Features:**
-- 🔍 **Connection Monitoring**: Real-time view of all active proxy connections
-- 📊 **Performance Metrics**: Data transfer statistics and uptime tracking
-- 🎯 **Multi-client Support**: Track multiple client instances from single interface
-- ⚙️ **Runtime Information**: Client status, connection summaries, and system metrics
-
-### API Endpoints
-
-**Gateway API:**
-- `POST /api/auth/login` - Create 24-hour authenticated session
-- `POST /api/auth/logout` - Destroy current session
-- `GET /api/auth/check` - Verify authentication status
-- `GET /api/metrics/global` - Global system metrics (connections, data transfer, success rate)
-- `GET /api/metrics/clients` - All client statistics with online/offline status
-- `GET /api/metrics/connections` - Active connection details and traffic metrics
-
-**Client API:**
-- `POST /api/auth/login` - User login (if authentication enabled)
-- `POST /api/auth/logout` - User logout (if authentication enabled)
-- `GET /api/auth/check` - Check authentication status
-- `GET /api/status` - Client runtime status with connection summary
-- `GET /api/metrics/connections` - Connection metrics for all tracked client instances
-
-## 🐳 Docker Deployment
-
-> 💡 **Ready to Use**: The Docker image includes test certificates and web interface files. You can start testing immediately by only providing configuration files.
-
-### Gateway (Public Server)
-```yaml
-# docker-compose.gateway.yml
-version: '3.8'
-services:
-  anyproxy-gateway:
-    image: buhuipao/anyproxy:latest
-    container_name: anyproxy-gateway
-    command: ./anyproxy-gateway --config configs/gateway.yaml
-    ports:
-      - "8080:8080"     # HTTP proxy
-      - "1080:1080"     # SOCKS5 proxy
-      - "9443:9443/udp" # TUIC proxy (UDP)
-      - "8443:8443"     # WebSocket (or 9090 for gRPC, 9091 for QUIC)
-      - "8090:8090"     # Web management interface
-    volumes:
-      - ./configs:/app/configs:ro
-      # Optional: Override built-in test certificate with your own
-      # - ./certs:/app/certs:ro
-      - ./logs:/app/logs
-    restart: unless-stopped
-```
-
-### Client (Private Network)
-```yaml
-# docker-compose.client.yml
-version: '3.8'
-services:
-  anyproxy-client:
-    image: buhuipao/anyproxy:latest
-    container_name: anyproxy-client
-    command: ./anyproxy-client --config configs/client.yaml
-    ports:
-      - "8091:8091"     # Web management interface
-    volumes:
-      - ./configs:/app/configs:ro
-      # Optional: Override built-in test certificate with your own
-      # - ./certs:/app/certs:ro
-      - ./logs:/app/logs
-    restart: unless-stopped
-    network_mode: host
-```
-
-## 🔐 Security
-
-### Certificate Management
-
-> ⚠️ **Critical Certificate Information**: The Docker image includes a pre-generated test certificate that **ONLY works for localhost, 127.0.0.1, and anyproxy**. For remote gateway deployment, you **MUST** generate certificates with the correct IP/domain.
-
-```bash
-# For remote gateway - Use the provided script (RECOMMENDED)
-./scripts/generate_certs.sh YOUR_GATEWAY_IP
-# or for domain:
-./scripts/generate_certs.sh gateway.yourdomain.com
-
-# Manual certificate generation (alternative)
-openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt \
-    -days 365 -nodes -subj "/CN=YOUR_DOMAIN" \
-    -addext "subjectAltName = IP:YOUR_IP,DNS:YOUR_DOMAIN"
-
-# Or use Let's Encrypt for production domains
-certbot certonly --standalone -d gateway.yourdomain.com
-
-# Built-in test certificate limitations:
-# ❌ Does NOT work for remote IP addresses
-# ❌ Does NOT work for custom domains  
-# ✅ Only works for: localhost, 127.0.0.1, anyproxy
-# ✅ Use only for local development/testing
-```
-
-### Security Best Practices
-- ✅ Use strong passwords for all authentication
-- ✅ Restrict allowed hosts to specific services only
-- ✅ Enable TLS for all transport protocols
-- ✅ Regularly rotate certificates
-- ✅ Monitor connection logs for suspicious activity
-- ✅ Use firewall rules to restrict access to management ports
-
-## 📊 Troubleshooting
-
-### Basic Health Checks
-```bash
-# Check gateway connectivity (with group_id)
-curl -x http://user.mygroup:pass@gateway:8080 https://httpbin.org/ip
-
-# Check TUIC proxy port (UDP)
-nc -u -v gateway 9443
-
-# Check web interfaces
-curl http://gateway:8090/api/metrics/global
-curl http://client:8091/api/status
-
-# Check logs
-docker logs anyproxy-gateway
-docker logs anyproxy-client
-
-# Test specific service (with group_id)
-curl -x http://user.mygroup:pass@gateway:8080 http://localhost:22
-```
+## 🔧 Troubleshooting
 
 ### Common Issues
-- **Connection refused**: Check firewall and port configuration
-- **Authentication failed**: Verify usernames and passwords in configs
-- **Certificate errors**: Ensure certificate matches domain/IP
-- **Transport mismatch**: Ensure Gateway and Client use the same transport type
-- **Web interface 404**: Verify web.enabled is true and ports are accessible
 
-## 🔗 Integration
+**1. Connection Refused**
+- Check if `group_id` and `group_password` match between gateway and client
+- Verify ports are open
+- Check TLS certificate configuration
 
-### Python Example
-```python
-import requests
+**2. Proxy Authentication Failed**
+- Ensure you're using `group_id` as username and `group_password` as password
+- Verify client is connected to gateway
+- **Ensure all clients with the same `group_id` use identical `group_password`**
 
-# With group_id (replace 'mygroup' with your group_id)
-proxies = {
-    'http': 'http://user.mygroup:pass@gateway.com:8080',
-    'https': 'http://user.mygroup:pass@gateway.com:8080'
-}
+**3. Cannot Access Services**
+- Check `allowed_hosts` configuration
+- Ensure target service is not in `forbidden_hosts` list
 
-response = requests.get('http://localhost:8000/api', proxies=proxies)
-print(response.json())
+**4. Certificate Errors**
+- Ensure certificate files are properly mounted to containers
+- Verify certificate domain/IP matches actual access address
+- Check certificate file permissions
 
-# Without group_id (routes to default group)
-proxies_default = {
-    'http': 'http://user:pass@gateway.com:8080',
-    'https': 'http://user:pass@gateway.com:8080'
-}
-```
+**5. QUIC/TUIC Connection Issues**
+- Ensure Docker ports are set as UDP type (`-p 9091:9091/udp`)
+- Check firewall allows UDP traffic
 
-### cURL Example
+### View Logs
+
 ```bash
-# HTTP proxy (with group_id - replace 'mygroup' with your group_id)
-curl -x http://user.mygroup:pass@gateway:8080 http://localhost:3000
+# View gateway logs
+docker logs anyproxy-gateway
 
-# SOCKS5 proxy (with group_id)
-curl --socks5 user.mygroup:pass@gateway:1080 http://localhost:22
+# View client logs
+docker logs anyproxy-client
 
-# Without group_id (routes to default group)
-curl -x http://user:pass@gateway:8080 http://localhost:3000
+# Or view file logs
+tail -f logs/gateway.log
+tail -f logs/client.log
 ```
 
-### Clash Configuration
-```yaml
-proxies:
-  - name: "AnyProxy-HTTP"
-    type: http
-    server: YOUR_GATEWAY_IP
-    port: 8080
-    username: proxy_user
-    password: secure_proxy_password
+## 📝 License
 
-  - name: "AnyProxy-SOCKS5"
-    type: socks5
-    server: YOUR_GATEWAY_IP
-    port: 1080
-    username: socks_user
-    password: secure_socks_password
-```
-
-## 📚 Quick Reference
-
-**Default Ports:**
-- HTTP Proxy: `8080`
-- SOCKS5 Proxy: `1080`
-- TUIC Proxy: `9443` (UDP)
-- WebSocket: `8443`, gRPC: `9090`, QUIC: `9091`
-- Gateway Web: `8090`, Client Web: `8091`
-
-**Key Commands:**
-```bash
-# Start gateway
-./anyproxy-gateway --config gateway.yaml
-
-# Start client  
-./anyproxy-client --config client.yaml
-
-# Test connection (with group_id - replace 'mygroup' with your group_id)
-curl -x http://user.mygroup:pass@gateway:8080 https://httpbin.org/ip
-
-# Access web interface
-open http://gateway:8090  # Gateway dashboard
-open http://client:8091   # Client monitoring
-```
+MIT License - see [LICENSE](LICENSE) file for details
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Issues and Pull Requests are welcome!
 
 ---
 
-**Built with ❤️ by the AnyProxy team**
-
-### Support & Community
-
-- 🐛 **Issues**: [GitHub Issues](https://github.com/buhuipao/anyproxy/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/buhuipao/anyproxy/discussions)
-- 📧 **Email**: chenhua22@outlook.com
-- 🌟 **Star us** on GitHub if AnyProxy helps you!
-
----
-
-*For the latest updates and releases, visit our [GitHub repository](https://github.com/buhuipao/anyproxy).*
+**Quick Links**:
+- [30-Second Demo Experience](demo/)
+- [Complete Configuration Example](examples/complete-config.yaml)
+- [GitHub Issues](https://github.com/buhuipao/anyproxy/issues)
+- [Releases](https://github.com/buhuipao/anyproxy/releases)

@@ -4,6 +4,8 @@
 
 .vscode/
 
+demo/configs/config.yaml
+
 build/
 
 bin/

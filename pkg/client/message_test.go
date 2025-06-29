@@ -17,13 +17,10 @@ import (
 
 // mockMessageConnection implements transport.Connection for message testing
 type mockMessageConnection struct {
-	messages      []map[string]interface{}
-	messageIndex  int
-	writeMessages []map[string]interface{}
-	readData      []byte // Added to support custom read data
-	readErr       error
-	writeErr      error
-	closed        bool
+	readData []byte
+	readErr  error
+	writeErr error
+	closed   bool
 }
 
 func (m *mockMessageConnection) ReadMessage() ([]byte, error) {

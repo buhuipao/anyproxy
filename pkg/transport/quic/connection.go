@@ -308,7 +308,6 @@ func (c *quicConnection) receiveLoop() {
 				if err == io.EOF || isQUICError(err) {
 					return
 				}
-				logger.Error("Error reading data", "err", err, "client_id", c.clientID)
 				select {
 				case c.errorChan <- err:
 				case <-c.ctx.Done():

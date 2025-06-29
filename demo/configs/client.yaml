@@ -10,22 +10,22 @@ log:
   max_age: 30             
   compress: true          
 
-transport:
-  type: "grpc"
-
 client:
-  gateway_addr: "47.107.181.88:8443"  # demo gateway address
-  gateway_tls_cert: "certs/server.crt"
-  client_id: "client-demo"
-  # demo group id, change it to your own group id
-  # !!! Careful: if you don't set, it means your client will be a default group client
-  group_id: "changed-to-your-group-id"
-  replicas: 3
-  auth_username: "gateway_user"
-  auth_password: "gateway_password"
+  id: "client-demo"
+  gateway:
+    addr: "47.107.181.88:8443"  # demo gateway address
+    transport_type: "grpc"
+    tls_cert: "certs/server.crt"
+    auth_username: "gateway_user"
+    auth_password: "gateway_password"
+  # You must set group_id and group_password
+  group_id: "demo-group"
+  group_password: "demo-password"
+  replicas: 1
   forbidden_hosts:
     - "0.0.0.0"
     - "127.0.0.1"
+    - "192.168.0.0/16"
   allowed_hosts:
     - ".*"
   open_ports:
