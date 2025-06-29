@@ -28,6 +28,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate configuration (additional validation with clear error messages)
+	if err := cfg.Validate(); err != nil {
+		logger.Error("Configuration validation failed", "err", err)
+		os.Exit(1)
+	}
+
 	// Initialize logger
 	if err := logger.Init(&cfg.Log); err != nil {
 		logger.Error("Failed to initialize logger", "err", err)

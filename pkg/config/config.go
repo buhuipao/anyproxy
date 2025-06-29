@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v2"
@@ -120,6 +121,11 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %v", err)
+	}
+
 	conf = &config
 
 	return &config, nil
@@ -128,4 +134,20 @@ func LoadConfig(filename string) (*Config, error) {
 // GetConfig returns the global configuration
 func GetConfig() *Config {
 	return conf
+}
+
+// Validate validates the configuration
+func (c *Config) Validate() error {
+	// Only validate client configuration if client ID is set (indicating client usage)
+	if c.Client.ClientID != "" {
+		if c.Client.GroupID == "" {
+			return fmt.Errorf("client group_id cannot be empty")
+		}
+
+		if c.Client.GroupPassword == "" {
+			return fmt.Errorf("client group_password cannot be empty")
+		}
+	}
+
+	return nil
 }

@@ -24,23 +24,25 @@ import (
 	_ "github.com/buhuipao/anyproxy/pkg/transport/websocket"
 )
 
+// GroupInfo represents consolidated group information
+type GroupInfo struct {
+	Clients  []string // Ordered list of client IDs for round-robin
+	Counter  int      // Round-robin counter
+	Password string   // Group password for authentication
+}
+
 // Gateway represents the proxy gateway server
 type Gateway struct {
-	config        *config.GatewayConfig
-	transport     transport.Transport  // 🆕 The only new abstraction
-	proxies       []utils.GatewayProxy // Gateway proxy interfaces
-	clientsMu     sync.RWMutex
-	clients       map[string]*ClientConn
-	groups        map[string]map[string]struct{}
-	groupClients  map[string][]string // Fix: Maintain ordered client list for round-robin
-	groupCounters map[string]int      // Fix: Round-robin counter for each group
-	// Group credential management
-	groupCredentials map[string]string // group_id -> password
-	groupCredMu      sync.RWMutex      // Separate lock for group credentials
-	portForwardMgr   *PortForwardManager
-	ctx              context.Context
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
+	config         *config.GatewayConfig
+	transport      transport.Transport  // 🆕 The only new abstraction
+	proxies        []utils.GatewayProxy // Gateway proxy interfaces
+	clientsMu      sync.RWMutex
+	clients        map[string]*ClientConn
+	groups         map[string]*GroupInfo // Consolidated group information
+	portForwardMgr *PortForwardManager
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // NewGateway creates a new proxy gateway
@@ -71,41 +73,33 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	}
 
 	gateway := &Gateway{
-		config:           &cfg.Gateway,
-		transport:        transportImpl,
-		clients:          make(map[string]*ClientConn),
-		groups:           make(map[string]map[string]struct{}),
-		groupClients:     make(map[string][]string), // Fix: Initialize ordered client list
-		groupCounters:    make(map[string]int),      // Fix: Initialize round-robin counter
-		groupCredentials: make(map[string]string),
-		groupCredMu:      sync.RWMutex{},
-		portForwardMgr:   NewPortForwardManager(),
-		ctx:              ctx,
-		cancel:           cancel,
+		config:         &cfg.Gateway,
+		transport:      transportImpl,
+		clients:        make(map[string]*ClientConn),
+		groups:         make(map[string]*GroupInfo),
+		portForwardMgr: NewPortForwardManager(),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
-
-	// Initialize default group
-	gateway.groups[""] = make(map[string]struct{})
-	logger.Debug("Initialized default group for gateway")
 
 	// Create custom dial function
 	dialFn := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// Extract user information from context
-		var groupID string
-		if userCtx, ok := commonctx.GetUserContext(ctx); ok {
-			logger.Debug("Dial function received user context", "group_id", userCtx.GroupID, "network", network, "address", addr)
-			groupID = userCtx.GroupID
-		} else {
-			logger.Debug("Dial function using default group", "network", network, "address", addr)
+		userCtx, ok := commonctx.GetUserContext(ctx)
+		if !ok || userCtx.GroupID == "" {
+			logger.Error("Dial function requires valid group context", "network", network, "address", addr, "has_context", ok)
+			return nil, fmt.Errorf("missing or invalid group context")
 		}
 
+		logger.Debug("Dial function received user context", "group_id", userCtx.GroupID, "network", network, "address", addr)
+
 		// Get client
-		client, err := gateway.getClientByGroup(groupID)
+		client, err := gateway.getClientByGroup(userCtx.GroupID)
 		if err != nil {
-			logger.Error("Failed to get client by group for dial", "group_id", groupID, "network", network, "address", addr, "err", err)
+			logger.Error("Failed to get client by group for dial", "group_id", userCtx.GroupID, "network", network, "address", addr, "err", err)
 			return nil, err
 		}
-		logger.Debug("Successfully selected client for dial", "client_id", client.ID, "group_id", groupID, "network", network, "address", addr)
+		logger.Debug("Successfully selected client for dial", "client_id", client.ID, "group_id", userCtx.GroupID, "network", network, "address", addr)
 		return client.dialNetwork(ctx, network, addr)
 	}
 
@@ -374,6 +368,12 @@ func (g *Gateway) addClient(client *ClientConn) {
 	g.clientsMu.Lock()
 	defer g.clientsMu.Unlock()
 
+	// Validate group ID is non-empty
+	if client.GroupID == "" {
+		logger.Error("Cannot add client with empty group ID", "client_id", client.ID)
+		return
+	}
+
 	// Check if client already exists
 	if existingClient, exists := g.clients[client.ID]; exists {
 		logger.Warn("Replacing existing client connection", "client_id", client.ID, "old_group_id", existingClient.GroupID, "new_group_id", client.GroupID)
@@ -381,21 +381,24 @@ func (g *Gateway) addClient(client *ClientConn) {
 	}
 
 	g.clients[client.ID] = client
-	if _, ok := g.groups[client.GroupID]; !ok {
-		g.groups[client.GroupID] = make(map[string]struct{})
-		g.groupClients[client.GroupID] = make([]string, 0) // Fix: Initialize ordered list
-		g.groupCounters[client.GroupID] = 0                // Fix: Initialize counter
-		logger.Debug("Created new group", "group_id", client.GroupID)
-	}
-	g.groups[client.GroupID][client.ID] = struct{}{}
 
-	// Fix: Add to ordered list
-	g.groupClients[client.GroupID] = append(g.groupClients[client.GroupID], client.ID)
+	// Group should already exist from registerGroupCredentials, but ensure it exists
+	if _, ok := g.groups[client.GroupID]; !ok {
+		logger.Error("Group not found when adding client - this should not happen", "client_id", client.ID, "group_id", client.GroupID)
+		g.groups[client.GroupID] = &GroupInfo{
+			Clients:  make([]string, 0),
+			Counter:  0,
+			Password: "", // This is problematic - password should be set
+		}
+	}
+
+	// Add client to group's ordered list
+	g.groups[client.GroupID].Clients = append(g.groups[client.GroupID].Clients, client.ID)
 
 	// 🆕 Update client metrics when client connects
 	monitoring.UpdateClientMetrics(client.ID, client.GroupID, 0, 0, false)
 
-	groupSize := len(g.groups[client.GroupID])
+	groupSize := len(g.groups[client.GroupID].Clients)
 	totalClients := len(g.clients)
 	logger.Debug("Client added successfully", "client_id", client.ID, "group_id", client.GroupID, "group_size", groupSize, "total_clients", totalClients)
 }
@@ -419,22 +422,20 @@ func (g *Gateway) removeClient(clientID string) {
 	monitoring.MarkClientOffline(clientID)
 
 	delete(g.clients, clientID)
-	delete(g.groups[client.GroupID], clientID)
 
-	// Fix: Remove client from ordered list
-	if clients, ok := g.groupClients[client.GroupID]; ok {
-		for i, id := range clients {
+	// Remove client from group's ordered list
+	if groupInfo, ok := g.groups[client.GroupID]; ok {
+		for i, id := range groupInfo.Clients {
 			if id == clientID {
-				g.groupClients[client.GroupID] = append(clients[:i], clients[i+1:]...)
+				groupInfo.Clients = append(groupInfo.Clients[:i], groupInfo.Clients[i+1:]...)
 				break
 			}
 		}
 	}
 
-	if len(g.groups[client.GroupID]) == 0 && client.GroupID != "" {
+	// Clean up empty group
+	if groupInfo, ok := g.groups[client.GroupID]; ok && len(groupInfo.Clients) == 0 {
 		delete(g.groups, client.GroupID)
-		delete(g.groupClients, client.GroupID)  // Fix: Clean up ordered list
-		delete(g.groupCounters, client.GroupID) // Fix: Clean up counter
 		logger.Debug("Removed empty group", "group_id", client.GroupID)
 	}
 
@@ -447,14 +448,13 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 	g.clientsMu.Lock()
 	defer g.clientsMu.Unlock()
 
-	clients, exists := g.groupClients[groupID]
-	if !exists || len(clients) == 0 {
+	groupInfo, exists := g.groups[groupID]
+	if !exists || len(groupInfo.Clients) == 0 {
 		return nil, fmt.Errorf("no clients available in group: %s", groupID)
 	}
 
-	// Fix: Implement true round-robin load balancing
-	// Get current counter value
-	counter := g.groupCounters[groupID]
+	clients := groupInfo.Clients
+	counter := groupInfo.Counter
 
 	// Try up to len(clients) times to find a healthy client
 	for i := 0; i < len(clients); i++ {
@@ -464,8 +464,8 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 
 		if client, exists := g.clients[clientID]; exists {
 			// Update counter to next position
-			g.groupCounters[groupID] = (idx + 1) % len(clients)
-			logger.Info("Round-robin client selection", "group_id", groupID, "selected_client", clientID, "counter_before", counter, "counter_after", g.groupCounters[groupID], "total_clients", len(clients), "available_clients", clients)
+			groupInfo.Counter = (idx + 1) % len(clients)
+			logger.Info("Round-robin client selection", "group_id", groupID, "selected_client", clientID, "counter_before", counter, "counter_after", groupInfo.Counter, "total_clients", len(clients), "available_clients", clients)
 			return client, nil
 		}
 		logger.Warn("Client not found in clients map during round-robin", "group_id", groupID, "target_client", clientID, "counter", counter, "idx", idx, "total_clients", len(clients), "available_clients", clients)
@@ -476,35 +476,83 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 
 // registerGroupCredentials registers or validates group credentials from a client
 func (g *Gateway) registerGroupCredentials(groupID, password string) error {
-	g.groupCredMu.Lock()
-	defer g.groupCredMu.Unlock()
+	g.clientsMu.Lock()
+	defer g.clientsMu.Unlock()
 
-	if existingPassword, exists := g.groupCredentials[groupID]; exists {
-		if existingPassword != password {
-			return fmt.Errorf("password mismatch for group %s: different clients provided different passwords", groupID)
+	// Validate group ID is non-empty
+	if groupID == "" {
+		return fmt.Errorf("group ID cannot be empty")
+	}
+
+	// Validate password is non-empty
+	if password == "" {
+		return fmt.Errorf("group password cannot be empty")
+	}
+
+	// Create group if it doesn't exist
+	if _, exists := g.groups[groupID]; !exists {
+		g.groups[groupID] = &GroupInfo{
+			Clients:  make([]string, 0),
+			Counter:  0,
+			Password: password,
 		}
-		// Password matches, no need to update
+		logger.Info("Registered credentials for new group", "group_id", groupID)
 		return nil
 	}
 
-	// Register new group credentials
-	g.groupCredentials[groupID] = password
-	logger.Info("Registered credentials for new group", "group_id", groupID)
+	// 🚨 CRITICAL FIX: Check if group has active clients
+	groupInfo := g.groups[groupID]
+
+	// Count actual active clients to handle race conditions
+	actualActiveClients := 0
+	for _, clientID := range groupInfo.Clients {
+		if _, exists := g.clients[clientID]; exists {
+			actualActiveClients++
+		}
+	}
+
+	// If group has no active clients, allow password change (treat as new group)
+	if actualActiveClients == 0 {
+		logger.Info("Group has no active clients, allowing password change", "group_id", groupID, "listed_clients", len(groupInfo.Clients), "active_clients", actualActiveClients)
+		groupInfo.Password = password
+		groupInfo.Clients = make([]string, 0) // Reset client list
+		groupInfo.Counter = 0                 // Reset counter
+		logger.Info("Group credentials updated for reconnection", "group_id", groupID)
+		return nil
+	}
+
+	// Validate existing group password only if there are active clients
+	existingPassword := groupInfo.Password
+	logger.Debug("Validating group credentials", "group_id", groupID, "existing_password_set", existingPassword != "", "passwords_match", existingPassword == password, "active_clients", actualActiveClients)
+
+	if existingPassword != "" && existingPassword != password {
+		logger.Error("Password mismatch detected", "group_id", groupID, "existing_password_length", len(existingPassword), "provided_password_length", len(password), "active_clients", actualActiveClients)
+		return fmt.Errorf("password mismatch for group %s: different clients provided different passwords", groupID)
+	}
+
+	// Set password if not already set (this should not happen in normal flow)
+	if existingPassword == "" {
+		groupInfo.Password = password
+		logger.Warn("Setting password for existing group with empty password - this should not happen", "group_id", groupID)
+	} else {
+		logger.Debug("Password validation successful", "group_id", groupID, "active_clients", actualActiveClients)
+	}
+
 	return nil
 }
 
 // validateGroupCredentials validates group credentials for proxy authentication
 func (g *Gateway) validateGroupCredentials(groupID, password string) bool {
-	g.groupCredMu.RLock()
-	defer g.groupCredMu.RUnlock()
+	g.clientsMu.RLock()
+	defer g.clientsMu.RUnlock()
 
-	expectedPassword, exists := g.groupCredentials[groupID]
+	groupInfo, exists := g.groups[groupID]
 	if !exists {
 		logger.Warn("Authentication failed: unknown group", "group_id", groupID)
 		return false
 	}
 
-	isValid := expectedPassword == password
+	isValid := groupInfo.Password == password
 	if !isValid {
 		logger.Warn("Authentication failed: invalid password", "group_id", groupID)
 	}

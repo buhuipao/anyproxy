@@ -114,8 +114,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "basic client creation",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -127,8 +128,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "client with authentication",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr:         "localhost:8080",
 					AuthUsername: "user",
@@ -142,8 +144,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "client with port forwarding",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -163,8 +166,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "client with forbidden hosts",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -178,8 +182,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "client with allowed hosts",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -193,8 +198,9 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "invalid transport type",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -206,12 +212,41 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "invalid regex pattern",
 			config: &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
 				ForbiddenHosts: []string{"[invalid regex"},
+			},
+			transportType: "websocket",
+			replicaIdx:    0,
+			wantErr:       true,
+		},
+		{
+			name: "empty group ID",
+			config: &config.ClientConfig{
+				ClientID:      "test-client",
+				GroupID:       "",
+				GroupPassword: "test-password",
+				Gateway: config.ClientGatewayConfig{
+					Addr: "localhost:8080",
+				},
+			},
+			transportType: "websocket",
+			replicaIdx:    0,
+			wantErr:       true,
+		},
+		{
+			name: "empty group password",
+			config: &config.ClientConfig{
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "",
+				Gateway: config.ClientGatewayConfig{
+					Addr: "localhost:8080",
+				},
 			},
 			transportType: "websocket",
 			replicaIdx:    0,

@@ -56,6 +56,8 @@ func TestCompileHostPatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &Client{
 				config: &config.ClientConfig{
+					GroupID:        "test-group",
+					GroupPassword:  "test-password",
 					ForbiddenHosts: tt.forbiddenHosts,
 					AllowedHosts:   tt.allowedHosts,
 				},

@@ -298,12 +298,7 @@ func TestNewGateway(t *testing.T) {
 					if gw.groups == nil {
 						t.Error("Groups map should not be nil")
 					}
-					if gw.groupClients == nil {
-						t.Error("GroupClients map should not be nil")
-					}
-					if gw.groupCounters == nil {
-						t.Error("GroupCounters map should not be nil")
-					}
+
 					if gw.portForwardMgr == nil {
 						t.Error("PortForwardMgr should not be nil")
 					}
@@ -325,16 +320,11 @@ func TestGateway_ClientManagement(t *testing.T) {
 
 	gw := &Gateway{
 		clients:        make(map[string]*ClientConn),
-		groups:         make(map[string]map[string]struct{}),
-		groupClients:   make(map[string][]string),
-		groupCounters:  make(map[string]int),
+		groups:         make(map[string]*GroupInfo),
 		portForwardMgr: NewPortForwardManager(),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
-
-	// Initialize default group
-	gw.groups[""] = make(map[string]struct{})
 
 	// Test adding clients
 	t.Run("add clients", func(t *testing.T) {
@@ -362,11 +352,8 @@ func TestGateway_ClientManagement(t *testing.T) {
 		if gw.clients["client1"] != client1 {
 			t.Error("Client1 not found in clients map")
 		}
-		if _, ok := gw.groups["group1"]["client1"]; !ok {
-			t.Error("Client1 not found in group1")
-		}
-		if !containsSlice(gw.groupClients["group1"], "client1") {
-			t.Error("Client1 not found in groupClients")
+		if !containsSlice(gw.groups["group1"].Clients, "client1") {
+			t.Error("Client1 not found in group1 clients")
 		}
 
 		// Add another client to the same group
@@ -391,11 +378,8 @@ func TestGateway_ClientManagement(t *testing.T) {
 		if len(gw.clients) != 2 {
 			t.Errorf("Expected 2 clients, got %d", len(gw.clients))
 		}
-		if len(gw.groups["group1"]) != 2 {
-			t.Errorf("Expected 2 clients in group1, got %d", len(gw.groups["group1"]))
-		}
-		if len(gw.groupClients["group1"]) != 2 {
-			t.Errorf("Expected 2 clients in groupClients[group1], got %d", len(gw.groupClients["group1"]))
+		if len(gw.groups["group1"].Clients) != 2 {
+			t.Errorf("Expected 2 clients in group1, got %d", len(gw.groups["group1"].Clients))
 		}
 	})
 
@@ -448,14 +432,11 @@ func TestGateway_ClientManagement(t *testing.T) {
 		if _, ok := gw.clients["client1"]; ok {
 			t.Error("Client1 should have been removed")
 		}
-		if len(gw.groups["group1"]) != 1 {
-			t.Errorf("Expected 1 client in group1, got %d", len(gw.groups["group1"]))
+		if len(gw.groups["group1"].Clients) != 1 {
+			t.Errorf("Expected 1 client in group1, got %d", len(gw.groups["group1"].Clients))
 		}
-		if len(gw.groupClients["group1"]) != 1 {
-			t.Errorf("Expected 1 client in groupClients[group1], got %d", len(gw.groupClients["group1"]))
-		}
-		if containsSlice(gw.groupClients["group1"], "client1") {
-			t.Error("Client1 should not be in groupClients")
+		if containsSlice(gw.groups["group1"].Clients, "client1") {
+			t.Error("Client1 should not be in group1 clients")
 		}
 
 		// Remove last client from group
@@ -467,18 +448,74 @@ func TestGateway_ClientManagement(t *testing.T) {
 		if _, ok := gw.groups["group1"]; ok {
 			t.Error("Group1 should have been removed")
 		}
-		if _, ok := gw.groupClients["group1"]; ok {
-			t.Error("Group1 should have been removed from groupClients")
-		}
-		if _, ok := gw.groupCounters["group1"]; ok {
-			t.Error("Group1 should have been removed from groupCounters")
-		}
 
 		// Test removing non-existent client
 		gw.removeClient("nonexistent")
 		if len(gw.clients) != 0 {
 			t.Error("Client count should remain 0")
 		}
+	})
+
+	// Test group credentials cleanup bug fix
+	t.Run("group credentials cleanup on empty group", func(t *testing.T) {
+		// Create and add a client with group credentials
+		mockConn3 := &mockConnection{
+			clientID: "client3",
+			groupID:  "temp-group",
+			password: "temp-pass",
+		}
+
+		client3 := &ClientConn{
+			ID:             "client3",
+			GroupID:        "temp-group",
+			Conn:           mockConn3,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            ctx,
+			cancel:         cancel,
+			portForwardMgr: gw.portForwardMgr,
+		}
+
+		// Register group credentials and add client
+		err := gw.registerGroupCredentials("temp-group", "temp-pass")
+		if err != nil {
+			t.Errorf("Failed to register group credentials: %v", err)
+		}
+		gw.addClient(client3)
+
+		// Verify group credentials are registered
+		gw.clientsMu.RLock()
+		if groupInfo, exists := gw.groups["temp-group"]; !exists {
+			t.Error("Group should exist")
+		} else if groupInfo.Password != "temp-pass" {
+			t.Errorf("Expected password 'temp-pass', got '%s'", groupInfo.Password)
+		}
+		gw.clientsMu.RUnlock()
+
+		// Remove the client (last one in the group)
+		gw.removeClient("client3")
+
+		// Verify group is cleaned up when empty
+		gw.clientsMu.RLock()
+		if _, exists := gw.groups["temp-group"]; exists {
+			t.Error("Group should have been cleaned up when it became empty")
+		}
+		gw.clientsMu.RUnlock()
+
+		// Test the bug fix: client should be able to reconnect with different password
+		err = gw.registerGroupCredentials("temp-group", "new-pass")
+		if err != nil {
+			t.Errorf("Client should be able to register with new password after group cleanup, got error: %v", err)
+		}
+
+		// Verify new password is registered
+		gw.clientsMu.RLock()
+		if groupInfo, exists := gw.groups["temp-group"]; !exists {
+			t.Error("New group should be registered")
+		} else if groupInfo.Password != "new-pass" {
+			t.Errorf("Expected new password 'new-pass', got '%s'", groupInfo.Password)
+		}
+		gw.clientsMu.RUnlock()
 	})
 }
 
@@ -574,23 +611,18 @@ func TestGateway_HandleConnection(t *testing.T) {
 	defer cancel()
 
 	gw := &Gateway{
-		clients:          make(map[string]*ClientConn),
-		groups:           make(map[string]map[string]struct{}),
-		groupClients:     make(map[string][]string),
-		groupCounters:    make(map[string]int),
-		groupCredentials: make(map[string]string),
-		portForwardMgr:   NewPortForwardManager(),
-		ctx:              ctx,
-		cancel:           cancel,
+		clients:        make(map[string]*ClientConn),
+		groups:         make(map[string]*GroupInfo),
+		portForwardMgr: NewPortForwardManager(),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
-
-	// Initialize default group
-	gw.groups[""] = make(map[string]struct{})
 
 	t.Run("handle new connection", func(t *testing.T) {
 		mockConn := &mockConnection{
 			clientID: "test-client",
 			groupID:  "test-group",
+			password: "test-password",
 			readChan: make(chan struct{}),
 		}
 
@@ -717,13 +749,19 @@ func TestGateway_RegisterGroupCredentials(t *testing.T) {
 			name:        "register same group with different password",
 			groupID:     "group1",
 			password:    "pass2",
-			expectError: true,
+			expectError: false, // Should succeed when no active clients
 		},
 		{
 			name:        "register different group",
 			groupID:     "group2",
 			password:    "pass2",
 			expectError: false,
+		},
+		{
+			name:        "reject empty group ID",
+			groupID:     "",
+			password:    "somepass",
+			expectError: true,
 		},
 	}
 
@@ -907,4 +945,207 @@ func TestGateway_NewGatewayCreation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGateway_ClientRestartWithNewPassword(t *testing.T) {
+	// Create minimal config for testing
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			ListenAddr:   ":8443",
+			AuthUsername: "test",
+			AuthPassword: "test",
+			Proxy: config.ProxyConfig{
+				HTTP: config.HTTPConfig{
+					ListenAddr: ":8080",
+				},
+			},
+		},
+	}
+
+	gateway, err := NewGateway(cfg, "grpc")
+	if err != nil {
+		t.Fatalf("Failed to create gateway: %v", err)
+	}
+
+	t.Run("client restart with new password should succeed", func(t *testing.T) {
+		// Step 1: Client connects with initial password
+		err := gateway.registerGroupCredentials("test-group", "initial-password")
+		if err != nil {
+			t.Fatalf("Failed to register initial credentials: %v", err)
+		}
+
+		// Verify group exists with initial password
+		gateway.clientsMu.RLock()
+		if groupInfo, exists := gateway.groups["test-group"]; !exists {
+			t.Fatal("Group should exist after registration")
+		} else if groupInfo.Password != "initial-password" {
+			t.Errorf("Expected password 'initial-password', got '%s'", groupInfo.Password)
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 2: Simulate client connection
+		mockConn := &mockConnection{
+			clientID: "test-client",
+			groupID:  "test-group",
+			password: "initial-password",
+		}
+
+		client := &ClientConn{
+			ID:             "test-client",
+			GroupID:        "test-group",
+			Conn:           mockConn,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            context.Background(),
+			cancel:         func() {},
+			portForwardMgr: gateway.portForwardMgr,
+		}
+
+		gateway.addClient(client)
+
+		// Verify client is added
+		gateway.clientsMu.RLock()
+		if len(gateway.clients) != 1 {
+			t.Errorf("Expected 1 client, got %d", len(gateway.clients))
+		}
+		if len(gateway.groups["test-group"].Clients) != 1 {
+			t.Errorf("Expected 1 client in group, got %d", len(gateway.groups["test-group"].Clients))
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 3: Client disconnects (simulate client restart)
+		gateway.removeClient("test-client")
+
+		// Verify group is cleaned up when empty
+		gateway.clientsMu.RLock()
+		if _, exists := gateway.groups["test-group"]; exists {
+			t.Error("Group should be cleaned up when it becomes empty")
+		}
+		if len(gateway.clients) != 0 {
+			t.Errorf("Expected 0 clients after removal, got %d", len(gateway.clients))
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 4: Client reconnects with NEW password (this should succeed)
+		err = gateway.registerGroupCredentials("test-group", "new-password")
+		if err != nil {
+			t.Errorf("Client should be able to register with new password after group cleanup, got error: %v", err)
+		}
+
+		// Verify new password is accepted
+		gateway.clientsMu.RLock()
+		if groupInfo, exists := gateway.groups["test-group"]; !exists {
+			t.Error("New group should be registered")
+		} else if groupInfo.Password != "new-password" {
+			t.Errorf("Expected new password 'new-password', got '%s'", groupInfo.Password)
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 5: Verify proxy authentication works with new password
+		isValid := gateway.validateGroupCredentials("test-group", "new-password")
+		if !isValid {
+			t.Error("New password should be valid for proxy authentication")
+		}
+
+		// Old password should no longer work
+		isValid = gateway.validateGroupCredentials("test-group", "initial-password")
+		if isValid {
+			t.Error("Old password should not be valid after group cleanup")
+		}
+	})
+}
+
+func TestGateway_RaceConditionFix(t *testing.T) {
+	// Create minimal config for testing
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			ListenAddr:   ":8443",
+			AuthUsername: "test",
+			AuthPassword: "test",
+			Proxy: config.ProxyConfig{
+				HTTP: config.HTTPConfig{
+					ListenAddr: ":8080",
+				},
+			},
+		},
+	}
+
+	gateway, err := NewGateway(cfg, "grpc")
+	if err != nil {
+		t.Fatalf("Failed to create gateway: %v", err)
+	}
+
+	t.Run("client restart with new password should succeed", func(t *testing.T) {
+		// Step 1: Register first client with initial password
+		err := gateway.registerGroupCredentials("test-group", "initial-password")
+		if err != nil {
+			t.Fatalf("Failed to register initial credentials: %v", err)
+		}
+
+		// Step 2: Simulate adding the client
+		mockConn := &mockConnection{
+			clientID: "test-client",
+			groupID:  "test-group",
+			password: "initial-password",
+		}
+
+		client := &ClientConn{
+			ID:             "test-client",
+			GroupID:        "test-group",
+			Conn:           mockConn,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            context.Background(),
+			cancel:         func() {},
+			portForwardMgr: gateway.portForwardMgr,
+		}
+
+		gateway.addClient(client)
+
+		// Verify client is added and group has active clients
+		gateway.clientsMu.RLock()
+		if len(gateway.clients) != 1 {
+			t.Errorf("Expected 1 client, got %d", len(gateway.clients))
+		}
+		if len(gateway.groups["test-group"].Clients) != 1 {
+			t.Errorf("Expected 1 client in group, got %d", len(gateway.groups["test-group"].Clients))
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 3: Attempt to register with different password while client is active (should fail)
+		err = gateway.registerGroupCredentials("test-group", "new-password")
+		if err == nil {
+			t.Error("Should fail to register with different password while client is active")
+		}
+
+		// Step 4: Remove client (simulate client disconnect)
+		gateway.removeClient("test-client")
+
+		// Step 5: Now attempt to register with new password (should succeed)
+		err = gateway.registerGroupCredentials("test-group", "new-password")
+		if err != nil {
+			t.Errorf("Should succeed to register with new password after client disconnect, got error: %v", err)
+		}
+
+		// Step 6: Verify new password is set
+		gateway.clientsMu.RLock()
+		if groupInfo, ok := gateway.groups["test-group"]; !ok {
+			t.Error("Group should exist after new registration")
+		} else if groupInfo.Password != "new-password" {
+			t.Errorf("Expected new-password, got %s", groupInfo.Password)
+		}
+		gateway.clientsMu.RUnlock()
+
+		// Step 7: Verify proxy authentication works with new password
+		isValid := gateway.validateGroupCredentials("test-group", "new-password")
+		if !isValid {
+			t.Error("New password should be valid for authentication")
+		}
+
+		// Old password should no longer work
+		isValid = gateway.validateGroupCredentials("test-group", "initial-password")
+		if isValid {
+			t.Error("Old password should not be valid after password change")
+		}
+	})
 }

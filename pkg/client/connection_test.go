@@ -170,8 +170,9 @@ func TestConnectionLoop(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -290,8 +291,9 @@ func TestConnect(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
@@ -330,8 +332,9 @@ func TestConnect(t *testing.T) {
 func TestCloseAllConnections(t *testing.T) {
 	// Create client
 	config := &config.ClientConfig{
-		ClientID: "test-client",
-		GroupID:  "test-group",
+		ClientID:      "test-client",
+		GroupID:       "test-group",
+		GroupPassword: "test-password",
 		Gateway: config.ClientGatewayConfig{
 			Addr: "localhost:8080",
 		},
@@ -471,8 +474,9 @@ func TestHandleConnection(t *testing.T) {
 
 			// Create client
 			config := &config.ClientConfig{
-				ClientID: "test-client",
-				GroupID:  "test-group",
+				ClientID:      "test-client",
+				GroupID:       "test-group",
+				GroupPassword: "test-password",
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},

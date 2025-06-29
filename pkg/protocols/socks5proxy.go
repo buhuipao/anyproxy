@@ -81,13 +81,10 @@ func NewSOCKS5ProxyWithAuth(cfg *config.SOCKS5Config, dialFn func(context.Contex
 			}
 		}
 
-		// If no user context extracted, create default one
+		// Require authentication - no default group allowed
 		if userCtx == nil {
-			userCtx = &utils.UserContext{
-				Username: "socks5-user", // Default username for SOCKS5
-				GroupID:  "",            // Default group
-			}
-			logger.Debug("Using default user context for SOCKS5 request", "conn_id", connID, "default_username", userCtx.Username, "target_addr", addr)
+			logger.Error("SOCKS5 request requires authentication", "conn_id", connID, "target_addr", addr, "client", clientAddr)
+			return nil, fmt.Errorf("authentication required")
 		}
 
 		// Add user context to context

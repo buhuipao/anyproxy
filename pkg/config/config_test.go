@@ -469,3 +469,84 @@ log:
 		<-done
 	}
 }
+
+func TestConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid client config",
+			config: Config{
+				Client: ClientConfig{
+					ClientID:      "test-client",
+					GroupID:       "test-group",
+					GroupPassword: "test-password",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty config (no client ID)",
+			config: Config{
+				Client: ClientConfig{
+					ClientID:      "",
+					GroupID:       "",
+					GroupPassword: "",
+				},
+			},
+			wantErr: false, // Should pass since ClientID is empty
+		},
+		{
+			name: "client with empty group ID",
+			config: Config{
+				Client: ClientConfig{
+					ClientID:      "test-client",
+					GroupID:       "",
+					GroupPassword: "test-password",
+				},
+			},
+			wantErr: true,
+			errMsg:  "client group_id cannot be empty",
+		},
+		{
+			name: "client with empty group password",
+			config: Config{
+				Client: ClientConfig{
+					ClientID:      "test-client",
+					GroupID:       "test-group",
+					GroupPassword: "",
+				},
+			},
+			wantErr: true,
+			errMsg:  "client group_password cannot be empty",
+		},
+		{
+			name: "client with both group fields empty",
+			config: Config{
+				Client: ClientConfig{
+					ClientID:      "test-client",
+					GroupID:       "",
+					GroupPassword: "",
+				},
+			},
+			wantErr: true,
+			errMsg:  "client group_id cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Config.Validate() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && err.Error() != tt.errMsg {
+				t.Errorf("Config.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			}
+		})
+	}
+}
