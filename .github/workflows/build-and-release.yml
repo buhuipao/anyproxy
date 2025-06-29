@@ -125,9 +125,13 @@ jobs:
         go build -ldflags="-s -w" -o build/${{ matrix.goos }}-${{ matrix.goarch }}/${{ env.PROJECT_NAME }}-gateway${EXT} cmd/gateway/main.go
         go build -ldflags="-s -w" -o build/${{ matrix.goos }}-${{ matrix.goarch }}/${{ env.PROJECT_NAME }}-client${EXT} cmd/client/main.go
         
-        # Copy configuration files and certificates
+        # Copy configuration files, certificates, and web static assets
         cp -r configs build/${{ matrix.goos }}-${{ matrix.goarch }}/
         cp -r certs build/${{ matrix.goos }}-${{ matrix.goarch }}/
+        mkdir -p build/${{ matrix.goos }}-${{ matrix.goarch }}/web/client
+        mkdir -p build/${{ matrix.goos }}-${{ matrix.goarch }}/web/gateway
+        cp -r web/client/static build/${{ matrix.goos }}-${{ matrix.goarch }}/web/client/
+        cp -r web/gateway/static build/${{ matrix.goos }}-${{ matrix.goarch }}/web/gateway/
         cp README.md build/${{ matrix.goos }}-${{ matrix.goarch }}/
 
     - name: Create archive
