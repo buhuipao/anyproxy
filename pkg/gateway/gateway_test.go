@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/credential"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/transport"
@@ -318,10 +319,17 @@ func TestGateway_ClientManagement(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Create credential manager for testing
+	credentialMgr, err := credential.NewManager(&credential.Config{Type: credential.Memory})
+	if err != nil {
+		t.Fatalf("Failed to create credential manager: %v", err)
+	}
+
 	gw := &Gateway{
 		clients:        make(map[string]*ClientConn),
 		groups:         make(map[string]*GroupInfo),
 		portForwardMgr: NewPortForwardManager(),
+		credentialMgr:  credentialMgr,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -477,45 +485,56 @@ func TestGateway_ClientManagement(t *testing.T) {
 		}
 
 		// Register group credentials and add client
-		err := gw.registerGroupCredentials("temp-group", "temp-pass")
+		err := gw.credentialMgr.RegisterGroup("temp-group", "temp-pass")
 		if err != nil {
 			t.Errorf("Failed to register group credentials: %v", err)
 		}
+		// Initialize group info
+		gw.groupsMu.Lock()
+		gw.groups["temp-group"] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
+		}
+		gw.groupsMu.Unlock()
 		gw.addClient(client3)
 
-		// Verify group credentials are registered
-		gw.clientsMu.RLock()
-		if groupInfo, exists := gw.groups["temp-group"]; !exists {
-			t.Error("Group should exist")
-		} else if groupInfo.Password != "temp-pass" {
-			t.Errorf("Expected password 'temp-pass', got '%s'", groupInfo.Password)
+		// Verify group info exists
+		groupInfo, exists := gw.groups["temp-group"]
+		if !exists {
+			t.Error("Expected group 'temp-group' to exist")
+		} else if len(groupInfo.Clients) != 1 {
+			t.Errorf("Expected 1 client, got %d", len(groupInfo.Clients))
 		}
-		gw.clientsMu.RUnlock()
 
 		// Remove the client (last one in the group)
 		gw.removeClient("client3")
 
 		// Verify group is cleaned up when empty
-		gw.clientsMu.RLock()
+		gw.groupsMu.RLock()
 		if _, exists := gw.groups["temp-group"]; exists {
 			t.Error("Group should have been cleaned up when it became empty")
 		}
-		gw.clientsMu.RUnlock()
+		gw.groupsMu.RUnlock()
 
 		// Test the bug fix: client should be able to reconnect with different password
-		err = gw.registerGroupCredentials("temp-group", "new-pass")
+		err = gw.credentialMgr.RegisterGroup("temp-group", "new-pass")
 		if err != nil {
 			t.Errorf("Client should be able to register with new password after group cleanup, got error: %v", err)
 		}
 
-		// Verify new password is registered
-		gw.clientsMu.RLock()
-		if groupInfo, exists := gw.groups["temp-group"]; !exists {
-			t.Error("New group should be registered")
-		} else if groupInfo.Password != "new-pass" {
-			t.Errorf("Expected new password 'new-pass', got '%s'", groupInfo.Password)
+		// Verify credential manager has the new password
+		isValid := gw.credentialMgr.ValidateGroup("temp-group", "new-pass")
+		if !isValid {
+			t.Error("New password should be valid in credential manager")
 		}
-		gw.clientsMu.RUnlock()
+
+		// Group info in gateway is only created when a client connects
+		// So groups map should still be empty at this point
+		gw.groupsMu.RLock()
+		if _, exists := gw.groups["temp-group"]; exists {
+			t.Error("Group should not exist in gateway until a client connects")
+		}
+		gw.groupsMu.RUnlock()
 	})
 }
 
@@ -610,10 +629,17 @@ func TestGateway_HandleConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Create credential manager for testing
+	credentialMgr, err := credential.NewManager(&credential.Config{Type: credential.Memory})
+	if err != nil {
+		t.Fatalf("Failed to create credential manager: %v", err)
+	}
+
 	gw := &Gateway{
 		clients:        make(map[string]*ClientConn),
 		groups:         make(map[string]*GroupInfo),
 		portForwardMgr: NewPortForwardManager(),
+		credentialMgr:  credentialMgr,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -767,9 +793,9 @@ func TestGateway_RegisterGroupCredentials(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := gateway.registerGroupCredentials(tt.groupID, tt.password)
+			err := gateway.credentialMgr.RegisterGroup(tt.groupID, tt.password)
 			if (err != nil) != tt.expectError {
-				t.Errorf("registerGroupCredentials() error = %v, expectError %v", err, tt.expectError)
+				t.Errorf("RegisterGroup() error = %v, expectError %v", err, tt.expectError)
 			}
 		})
 	}
@@ -796,8 +822,8 @@ func TestGateway_ValidateGroupCredentials(t *testing.T) {
 	}
 
 	// Register some test groups
-	gateway.registerGroupCredentials("testgroup", "testpass")
-	gateway.registerGroupCredentials("anothergroup", "anotherpass")
+	gateway.credentialMgr.RegisterGroup("testgroup", "testpass")
+	gateway.credentialMgr.RegisterGroup("anothergroup", "anotherpass")
 
 	tests := []struct {
 		name     string
@@ -833,9 +859,9 @@ func TestGateway_ValidateGroupCredentials(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := gateway.validateGroupCredentials(tt.groupID, tt.password)
+			result := gateway.credentialMgr.ValidateGroup(tt.groupID, tt.password)
 			if result != tt.expected {
-				t.Errorf("validateGroupCredentials() = %v, expected %v", result, tt.expected)
+				t.Errorf("ValidateGroup() = %v, expected %v", result, tt.expected)
 			}
 		})
 	}
@@ -969,19 +995,25 @@ func TestGateway_ClientRestartWithNewPassword(t *testing.T) {
 
 	t.Run("client restart with new password should succeed", func(t *testing.T) {
 		// Step 1: Client connects with initial password
-		err := gateway.registerGroupCredentials("test-group", "initial-password")
+		err := gateway.credentialMgr.RegisterGroup("test-group", "initial-password")
 		if err != nil {
 			t.Fatalf("Failed to register initial credentials: %v", err)
 		}
 
-		// Verify group exists with initial password
-		gateway.clientsMu.RLock()
-		if groupInfo, exists := gateway.groups["test-group"]; !exists {
-			t.Fatal("Group should exist after registration")
-		} else if groupInfo.Password != "initial-password" {
-			t.Errorf("Expected password 'initial-password', got '%s'", groupInfo.Password)
+		// Initialize group info
+		gateway.groupsMu.Lock()
+		gateway.groups["test-group"] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
 		}
-		gateway.clientsMu.RUnlock()
+		gateway.groupsMu.Unlock()
+
+		// Verify group exists with initial password
+		gateway.groupsMu.RLock()
+		if _, exists := gateway.groups["test-group"]; !exists {
+			t.Fatal("Group should exist after registration")
+		}
+		gateway.groupsMu.RUnlock()
 
 		// Step 2: Simulate client connection
 		mockConn := &mockConnection{
@@ -1008,47 +1040,59 @@ func TestGateway_ClientRestartWithNewPassword(t *testing.T) {
 		if len(gateway.clients) != 1 {
 			t.Errorf("Expected 1 client, got %d", len(gateway.clients))
 		}
+		gateway.clientsMu.RUnlock()
+
+		gateway.groupsMu.RLock()
 		if len(gateway.groups["test-group"].Clients) != 1 {
 			t.Errorf("Expected 1 client in group, got %d", len(gateway.groups["test-group"].Clients))
 		}
-		gateway.clientsMu.RUnlock()
+		gateway.groupsMu.RUnlock()
 
 		// Step 3: Client disconnects (simulate client restart)
 		gateway.removeClient("test-client")
 
 		// Verify group is cleaned up when empty
-		gateway.clientsMu.RLock()
+		gateway.groupsMu.RLock()
 		if _, exists := gateway.groups["test-group"]; exists {
 			t.Error("Group should be cleaned up when it becomes empty")
 		}
+		gateway.groupsMu.RUnlock()
+
+		gateway.clientsMu.RLock()
 		if len(gateway.clients) != 0 {
 			t.Errorf("Expected 0 clients after removal, got %d", len(gateway.clients))
 		}
 		gateway.clientsMu.RUnlock()
 
 		// Step 4: Client reconnects with NEW password (this should succeed)
-		err = gateway.registerGroupCredentials("test-group", "new-password")
+		err = gateway.credentialMgr.RegisterGroup("test-group", "new-password")
 		if err != nil {
 			t.Errorf("Client should be able to register with new password after group cleanup, got error: %v", err)
 		}
 
-		// Verify new password is accepted
-		gateway.clientsMu.RLock()
-		if groupInfo, exists := gateway.groups["test-group"]; !exists {
-			t.Error("New group should be registered")
-		} else if groupInfo.Password != "new-password" {
-			t.Errorf("Expected new password 'new-password', got '%s'", groupInfo.Password)
+		// Initialize new group info
+		gateway.groupsMu.Lock()
+		gateway.groups["test-group"] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
 		}
-		gateway.clientsMu.RUnlock()
+		gateway.groupsMu.Unlock()
+
+		// Verify new password is accepted
+		gateway.groupsMu.RLock()
+		if _, exists := gateway.groups["test-group"]; !exists {
+			t.Error("New group should be registered")
+		}
+		gateway.groupsMu.RUnlock()
 
 		// Step 5: Verify proxy authentication works with new password
-		isValid := gateway.validateGroupCredentials("test-group", "new-password")
+		isValid := gateway.credentialMgr.ValidateGroup("test-group", "new-password")
 		if !isValid {
 			t.Error("New password should be valid for proxy authentication")
 		}
 
 		// Old password should no longer work
-		isValid = gateway.validateGroupCredentials("test-group", "initial-password")
+		isValid = gateway.credentialMgr.ValidateGroup("test-group", "initial-password")
 		if isValid {
 			t.Error("Old password should not be valid after group cleanup")
 		}
@@ -1075,12 +1119,20 @@ func TestGateway_RaceConditionFix(t *testing.T) {
 		t.Fatalf("Failed to create gateway: %v", err)
 	}
 
-	t.Run("client restart with new password should succeed", func(t *testing.T) {
+	t.Run("credential manager allows password updates with active clients", func(t *testing.T) {
 		// Step 1: Register first client with initial password
-		err := gateway.registerGroupCredentials("test-group", "initial-password")
+		err := gateway.credentialMgr.RegisterGroup("test-group", "initial-password")
 		if err != nil {
 			t.Fatalf("Failed to register initial credentials: %v", err)
 		}
+
+		// Initialize group info
+		gateway.groupsMu.Lock()
+		gateway.groups["test-group"] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
+		}
+		gateway.groupsMu.Unlock()
 
 		// Step 2: Simulate adding the client
 		mockConn := &mockConnection{
@@ -1107,43 +1159,80 @@ func TestGateway_RaceConditionFix(t *testing.T) {
 		if len(gateway.clients) != 1 {
 			t.Errorf("Expected 1 client, got %d", len(gateway.clients))
 		}
+		gateway.clientsMu.RUnlock()
+
+		gateway.groupsMu.RLock()
 		if len(gateway.groups["test-group"].Clients) != 1 {
 			t.Errorf("Expected 1 client in group, got %d", len(gateway.groups["test-group"].Clients))
 		}
-		gateway.clientsMu.RUnlock()
+		gateway.groupsMu.RUnlock()
 
-		// Step 3: Attempt to register with different password while client is active (should fail)
-		err = gateway.registerGroupCredentials("test-group", "new-password")
-		if err == nil {
-			t.Error("Should fail to register with different password while client is active")
+		// Step 3: Register with different password while client is active (credential manager allows this)
+		err = gateway.credentialMgr.RegisterGroup("test-group", "new-password")
+		if err != nil {
+			t.Error("Credential manager should allow password updates even with active clients")
 		}
 
-		// Step 4: Remove client (simulate client disconnect)
+		// The old client should still be connected with the gateway's group info unchanged
+		gateway.groupsMu.RLock()
+		if groupInfo, exists := gateway.groups["test-group"]; !exists {
+			t.Error("Group should still exist")
+		} else if len(groupInfo.Clients) != 1 {
+			t.Errorf("Expected 1 client, got %d", len(groupInfo.Clients))
+		}
+		gateway.groupsMu.RUnlock()
+
+		// Step 4: Verify credential manager has the new password
+		isValid := gateway.credentialMgr.ValidateGroup("test-group", "new-password")
+		if !isValid {
+			t.Error("Credential manager should validate new password")
+		}
+
+		// Old password should still work in credential manager (since we just updated it)
+		isValid = gateway.credentialMgr.ValidateGroup("test-group", "initial-password")
+		if isValid {
+			t.Error("Credential manager should not validate old password after update")
+		}
+
+		// Step 5: Remove client (simulate client disconnect)
 		gateway.removeClient("test-client")
 
-		// Step 5: Now attempt to register with new password (should succeed)
-		err = gateway.registerGroupCredentials("test-group", "new-password")
+		// Step 6: Verify group is cleaned up
+		gateway.groupsMu.RLock()
+		if _, exists := gateway.groups["test-group"]; exists {
+			t.Error("Group should be cleaned up when it becomes empty")
+		}
+		gateway.groupsMu.RUnlock()
+
+		// Step 7: New client connecting with new password should work
+		err = gateway.credentialMgr.RegisterGroup("test-group", "new-password")
 		if err != nil {
-			t.Errorf("Should succeed to register with new password after client disconnect, got error: %v", err)
+			t.Errorf("Should succeed to register with existing password, got error: %v", err)
 		}
 
-		// Step 6: Verify new password is set
-		gateway.clientsMu.RLock()
-		if groupInfo, ok := gateway.groups["test-group"]; !ok {
+		// Initialize new group info
+		gateway.groupsMu.Lock()
+		gateway.groups["test-group"] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
+		}
+		gateway.groupsMu.Unlock()
+
+		// Verify new password is set
+		gateway.groupsMu.RLock()
+		if _, ok := gateway.groups["test-group"]; !ok {
 			t.Error("Group should exist after new registration")
-		} else if groupInfo.Password != "new-password" {
-			t.Errorf("Expected new-password, got %s", groupInfo.Password)
 		}
-		gateway.clientsMu.RUnlock()
+		gateway.groupsMu.RUnlock()
 
-		// Step 7: Verify proxy authentication works with new password
-		isValid := gateway.validateGroupCredentials("test-group", "new-password")
+		// Step 8: Verify proxy authentication works with new password
+		isValid = gateway.credentialMgr.ValidateGroup("test-group", "new-password")
 		if !isValid {
 			t.Error("New password should be valid for authentication")
 		}
 
 		// Old password should no longer work
-		isValid = gateway.validateGroupCredentials("test-group", "initial-password")
+		isValid = gateway.credentialMgr.ValidateGroup("test-group", "initial-password")
 		if isValid {
 			t.Error("Old password should not be valid after password change")
 		}

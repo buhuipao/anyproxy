@@ -54,6 +54,21 @@ gateway:
     auth_password: "admin123"      # Web admin password
     session_key: "change-this-secret-key"  # Session encryption key
 
+  # Credential management configuration
+  # Controls how group authentication credentials are stored
+  credential:
+    # Storage type: "memory" (default, data lost on restart) or "file" (persistent)
+    type: "memory"
+
+    # File path for storing credentials (only used when type is "file")
+    # The file will store a simple JSON map of groupID -> passwordHash
+    # file_path: "credentials/groups.json"
+
+  # Alternative file-based credential configuration example:
+  # credential:
+  #   type: "file"
+  #   file_path: "/var/lib/anyproxy/credentials.json"
+
 # Client Configuration (Private Network)
 client:
   id: "production-client"          # Base client identifier

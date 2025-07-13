@@ -10,6 +10,7 @@ import (
 	"time"
 
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
+	"github.com/buhuipao/anyproxy/pkg/common/credential"
 	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
@@ -24,11 +25,10 @@ import (
 	_ "github.com/buhuipao/anyproxy/pkg/transport/websocket"
 )
 
-// GroupInfo represents consolidated group information
+// GroupInfo holds information about a group
 type GroupInfo struct {
-	Clients  []string // Ordered list of client IDs for round-robin
-	Counter  int      // Round-robin counter
-	Password string   // Group password for authentication
+	Clients []string // Ordered list of client IDs for round-robin
+	Counter int      // Round-robin counter
 }
 
 // Gateway represents the proxy gateway server
@@ -36,9 +36,11 @@ type Gateway struct {
 	config         *config.GatewayConfig
 	transport      transport.Transport  // 🆕 The only new abstraction
 	proxies        []utils.GatewayProxy // Gateway proxy interfaces
-	clientsMu      sync.RWMutex
+	clientsMu      sync.RWMutex         // Mutex for clients map
+	groupsMu       sync.RWMutex         // Mutex for groups map
 	clients        map[string]*ClientConn
 	groups         map[string]*GroupInfo // Consolidated group information
+	credentialMgr  *credential.Manager   // Credential manager
 	portForwardMgr *PortForwardManager
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -62,6 +64,27 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create credential manager
+	var credentialMgr *credential.Manager
+	var err error
+
+	// Convert config.CredentialConfig to credential.Config
+	if cfg.Gateway.Credential != nil {
+		credConfig := &credential.Config{
+			Type:     credential.Type(cfg.Gateway.Credential.Type),
+			FilePath: cfg.Gateway.Credential.FilePath,
+		}
+		credentialMgr, err = credential.NewManager(credConfig)
+	} else {
+		// Default to memory storage
+		credentialMgr, err = credential.NewManager(&credential.Config{Type: credential.Memory})
+	}
+
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create credential manager: %v", err)
+	}
+
 	// 🆕 Create transport layer - the only new logic
 	transportImpl := transport.CreateTransport(transportType, &transport.AuthConfig{
 		Username: cfg.Gateway.AuthUsername,
@@ -77,6 +100,7 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 		transport:      transportImpl,
 		clients:        make(map[string]*ClientConn),
 		groups:         make(map[string]*GroupInfo),
+		credentialMgr:  credentialMgr,
 		portForwardMgr: NewPortForwardManager(),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -109,7 +133,7 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	// Create HTTP proxy
 	if cfg.Gateway.Proxy.HTTP.ListenAddr != "" {
 		logger.Info("Configuring HTTP proxy", "listen_addr", cfg.Gateway.Proxy.HTTP.ListenAddr)
-		httpProxy, err := protocols.NewHTTPProxyWithAuth(&cfg.Gateway.Proxy.HTTP, dialFn, gateway.validateGroupCredentials)
+		httpProxy, err := protocols.NewHTTPProxyWithAuth(&cfg.Gateway.Proxy.HTTP, dialFn, gateway.credentialMgr.ValidateGroup)
 		if err != nil {
 			cancel()
 			logger.Error("Failed to create HTTP proxy", "listen_addr", cfg.Gateway.Proxy.HTTP.ListenAddr, "err", err)
@@ -122,7 +146,7 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	// Create SOCKS5 proxy
 	if cfg.Gateway.Proxy.SOCKS5.ListenAddr != "" {
 		logger.Info("Configuring SOCKS5 proxy", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
-		socks5Proxy, err := protocols.NewSOCKS5ProxyWithAuth(&cfg.Gateway.Proxy.SOCKS5, dialFn, gateway.validateGroupCredentials)
+		socks5Proxy, err := protocols.NewSOCKS5ProxyWithAuth(&cfg.Gateway.Proxy.SOCKS5, dialFn, gateway.credentialMgr.ValidateGroup)
 		if err != nil {
 			cancel()
 			logger.Error("Failed to create SOCKS5 proxy", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr, "err", err)
@@ -135,7 +159,7 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	// Create TUIC proxy
 	if cfg.Gateway.Proxy.TUIC.ListenAddr != "" {
 		logger.Info("Configuring TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr)
-		tuicProxy, err := protocols.NewTUICProxyWithAuth(&cfg.Gateway.Proxy.TUIC, dialFn, gateway.validateGroupCredentials, cfg.Gateway.TLSCert, cfg.Gateway.TLSKey)
+		tuicProxy, err := protocols.NewTUICProxyWithAuth(&cfg.Gateway.Proxy.TUIC, dialFn, gateway.credentialMgr.ValidateGroup, cfg.Gateway.TLSCert, cfg.Gateway.TLSKey)
 		if err != nil {
 			cancel()
 			logger.Error("Failed to create TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "err", err)
@@ -318,7 +342,7 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 	logger.Info("Client connected", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
 
 	// Register group credentials
-	if err := g.registerGroupCredentials(groupID, password); err != nil {
+	if err := g.credentialMgr.RegisterGroup(groupID, password); err != nil {
 		logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
 		// Send the error message to the client using proper error message type
 		msgHandler := message.NewGatewayExtendedMessageHandler(conn)
@@ -330,6 +354,17 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 		_ = conn.Close()
 		return
 	}
+
+	// Initialize group info if it doesn't exist
+	g.groupsMu.Lock()
+	if _, exists := g.groups[groupID]; !exists {
+		g.groups[groupID] = &GroupInfo{
+			Clients: make([]string, 0),
+			Counter: 0,
+		}
+		logger.Debug("Initialized group info", "group_id", groupID)
+	}
+	g.groupsMu.Unlock()
 
 	// Create client connection context
 	ctx, cancel := context.WithCancel(g.ctx)
@@ -382,23 +417,25 @@ func (g *Gateway) addClient(client *ClientConn) {
 
 	g.clients[client.ID] = client
 
+	// Add client to group's ordered list
+	g.groupsMu.Lock()
 	// Group should already exist from registerGroupCredentials, but ensure it exists
 	if _, ok := g.groups[client.GroupID]; !ok {
 		logger.Error("Group not found when adding client - this should not happen", "client_id", client.ID, "group_id", client.GroupID)
 		g.groups[client.GroupID] = &GroupInfo{
-			Clients:  make([]string, 0),
-			Counter:  0,
-			Password: "", // This is problematic - password should be set
+			Clients: make([]string, 0),
+			Counter: 0,
 		}
 	}
 
 	// Add client to group's ordered list
 	g.groups[client.GroupID].Clients = append(g.groups[client.GroupID].Clients, client.ID)
+	groupSize := len(g.groups[client.GroupID].Clients)
+	g.groupsMu.Unlock()
 
 	// 🆕 Update client metrics when client connects
 	monitoring.UpdateClientMetrics(client.ID, client.GroupID, 0, 0, false)
 
-	groupSize := len(g.groups[client.GroupID].Clients)
 	totalClients := len(g.clients)
 	logger.Debug("Client added successfully", "client_id", client.ID, "group_id", client.GroupID, "group_size", groupSize, "total_clients", totalClients)
 }
@@ -424,6 +461,7 @@ func (g *Gateway) removeClient(clientID string) {
 	delete(g.clients, clientID)
 
 	// Remove client from group's ordered list
+	g.groupsMu.Lock()
 	if groupInfo, ok := g.groups[client.GroupID]; ok {
 		for i, id := range groupInfo.Clients {
 			if id == clientID {
@@ -431,13 +469,18 @@ func (g *Gateway) removeClient(clientID string) {
 				break
 			}
 		}
-	}
 
-	// Clean up empty group
-	if groupInfo, ok := g.groups[client.GroupID]; ok && len(groupInfo.Clients) == 0 {
-		delete(g.groups, client.GroupID)
-		logger.Debug("Removed empty group", "group_id", client.GroupID)
+		// Clean up empty group
+		if len(groupInfo.Clients) == 0 {
+			delete(g.groups, client.GroupID)
+			// Also remove from credential manager
+			if err := g.credentialMgr.RemoveGroup(client.GroupID); err != nil {
+				logger.Error("Failed to remove group from credential manager", "group_id", client.GroupID, "err", err)
+			}
+			logger.Debug("Removed empty group", "group_id", client.GroupID)
+		}
 	}
+	g.groupsMu.Unlock()
 
 	remainingClients := len(g.clients)
 	logger.Info("Client removed successfully", "client_id", clientID, "group_id", client.GroupID, "remaining_clients", remainingClients)
@@ -472,89 +515,4 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 	}
 
 	return nil, fmt.Errorf("no healthy clients available in group: %s", groupID)
-}
-
-// registerGroupCredentials registers or validates group credentials from a client
-func (g *Gateway) registerGroupCredentials(groupID, password string) error {
-	g.clientsMu.Lock()
-	defer g.clientsMu.Unlock()
-
-	// Validate group ID is non-empty
-	if groupID == "" {
-		return fmt.Errorf("group ID cannot be empty")
-	}
-
-	// Validate password is non-empty
-	if password == "" {
-		return fmt.Errorf("group password cannot be empty")
-	}
-
-	// Create group if it doesn't exist
-	if _, exists := g.groups[groupID]; !exists {
-		g.groups[groupID] = &GroupInfo{
-			Clients:  make([]string, 0),
-			Counter:  0,
-			Password: password,
-		}
-		logger.Info("Registered credentials for new group", "group_id", groupID)
-		return nil
-	}
-
-	// 🚨 CRITICAL FIX: Check if group has active clients
-	groupInfo := g.groups[groupID]
-
-	// Count actual active clients to handle race conditions
-	actualActiveClients := 0
-	for _, clientID := range groupInfo.Clients {
-		if _, exists := g.clients[clientID]; exists {
-			actualActiveClients++
-		}
-	}
-
-	// If group has no active clients, allow password change (treat as new group)
-	if actualActiveClients == 0 {
-		logger.Info("Group has no active clients, allowing password change", "group_id", groupID, "listed_clients", len(groupInfo.Clients), "active_clients", actualActiveClients)
-		groupInfo.Password = password
-		groupInfo.Clients = make([]string, 0) // Reset client list
-		groupInfo.Counter = 0                 // Reset counter
-		logger.Info("Group credentials updated for reconnection", "group_id", groupID)
-		return nil
-	}
-
-	// Validate existing group password only if there are active clients
-	existingPassword := groupInfo.Password
-	logger.Debug("Validating group credentials", "group_id", groupID, "existing_password_set", existingPassword != "", "passwords_match", existingPassword == password, "active_clients", actualActiveClients)
-
-	if existingPassword != "" && existingPassword != password {
-		logger.Error("Password mismatch detected", "group_id", groupID, "existing_password_length", len(existingPassword), "provided_password_length", len(password), "active_clients", actualActiveClients)
-		return fmt.Errorf("password mismatch for group %s: different clients provided different passwords", groupID)
-	}
-
-	// Set password if not already set (this should not happen in normal flow)
-	if existingPassword == "" {
-		groupInfo.Password = password
-		logger.Warn("Setting password for existing group with empty password - this should not happen", "group_id", groupID)
-	} else {
-		logger.Debug("Password validation successful", "group_id", groupID, "active_clients", actualActiveClients)
-	}
-
-	return nil
-}
-
-// validateGroupCredentials validates group credentials for proxy authentication
-func (g *Gateway) validateGroupCredentials(groupID, password string) bool {
-	g.clientsMu.RLock()
-	defer g.clientsMu.RUnlock()
-
-	groupInfo, exists := g.groups[groupID]
-	if !exists {
-		logger.Warn("Authentication failed: unknown group", "group_id", groupID)
-		return false
-	}
-
-	isValid := groupInfo.Password == password
-	if !isValid {
-		logger.Warn("Authentication failed: invalid password", "group_id", groupID)
-	}
-	return isValid
 }

@@ -17,6 +17,9 @@ gateway:
   tls_key: "certs/server.key"
   auth_username: "gateway_user"
   auth_password: "gateway_password"
+  credential:
+    type: "memory"        # Options: "memory" (default) or "file"
+    # file_path: "credentials/groups.json"  # Only needed when type is "file"
   proxy:
     socks5:
       listen_addr: ":1080"

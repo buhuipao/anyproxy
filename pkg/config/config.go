@@ -36,16 +36,23 @@ type ProxyConfig struct {
 	TUIC   TUICConfig   `yaml:"tuic"`
 }
 
+// CredentialConfig represents the credential storage configuration
+type CredentialConfig struct {
+	Type     string `yaml:"type"`      // "memory" or "file"
+	FilePath string `yaml:"file_path"` // Only used for file type
+}
+
 // GatewayConfig represents the configuration for the proxy gateway
 type GatewayConfig struct {
-	ListenAddr    string      `yaml:"listen_addr"`
-	TransportType string      `yaml:"transport_type"`
-	TLSCert       string      `yaml:"tls_cert"`
-	TLSKey        string      `yaml:"tls_key"`
-	AuthUsername  string      `yaml:"auth_username"`
-	AuthPassword  string      `yaml:"auth_password"`
-	Proxy         ProxyConfig `yaml:"proxy"`
-	Web           WebConfig   `yaml:"web"`
+	ListenAddr    string            `yaml:"listen_addr"`
+	TransportType string            `yaml:"transport_type"`
+	TLSCert       string            `yaml:"tls_cert"`
+	TLSKey        string            `yaml:"tls_key"`
+	AuthUsername  string            `yaml:"auth_username"`
+	AuthPassword  string            `yaml:"auth_password"`
+	Credential    *CredentialConfig `yaml:"credential"` // Add credential configuration
+	Proxy         ProxyConfig       `yaml:"proxy"`
+	Web           WebConfig         `yaml:"web"`
 }
 
 // SOCKS5Config represents the configuration for the SOCKS5 proxy

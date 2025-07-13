@@ -64,6 +64,13 @@ curl -x http://your_group_id:your_password@47.107.181.88:8080 http://httpbin.org
 - **Client 监控**: 本地连接跟踪，性能分析
 - **多语言支持**: 完整中英文双语界面
 
+### 🔐 基于组的认证与负载均衡
+- **单一组ID**：直接使用 group_id 作为代理用户名（如：`prod-env:password`）
+- **轮询调度**：自动在同组客户端间分配负载
+- **零配置**：无需复杂的用户名格式，仅需 group_id 和密码
+- **高可用性**：客户端断开时无缝故障转移
+- **持久化凭证**：可选的基于文件的凭证存储，适用于生产环境
+
 ## 🏗️ 系统架构
 
 ```
@@ -389,6 +396,39 @@ client:
 # 证书文件会生成在 certs/ 目录下：
 # - certs/server.crt （证书文件）
 # - certs/server.key （私钥文件）
+```
+
+### 高级网关功能
+
+#### 凭证管理
+
+AnyProxy 使用简单的键值存储来管理组凭证：
+
+```yaml
+gateway:
+  credential:
+    type: "file"                        # 选项："memory"（默认）或 "file"
+    file_path: "credentials/groups.json" # 凭证存储文件路径
+```
+
+**内存存储（默认）**：
+- 快速的内存键值存储
+- 重启时凭证丢失
+- 适合开发/测试
+
+**文件存储**：
+- 持久化 JSON 存储
+- SHA256 密码哈希
+- 线程安全操作
+- 自动文件管理
+- 适合生产环境
+
+凭证文件结构示例（简单的 JSON 映射）：
+```json
+{
+  "prod-group": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+  "dev-group": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+}
 ```
 
 ## 🖥️ Web 管理界面

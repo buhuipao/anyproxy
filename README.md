@@ -65,6 +65,13 @@ curl -x http://your_group_id:your_password@47.107.181.88:8080 http://httpbin.org
 - **Client Monitoring**: Local connection tracking, performance analytics
 - **Multi-Language Support**: Complete English/Chinese bilingual interface
 
+### 🔐 Group-Based Authentication & Load Balancing
+- **Single Group ID**: Use group_id directly as proxy username (e.g., `prod-env:password`)
+- **Round-Robin**: Automatic load distribution across clients in the same group
+- **Zero-Config**: No complex username formats, just group_id and password
+- **High Availability**: Seamless failover when clients disconnect
+- **Persistent Credentials**: Optional file-based credential storage for production use
+
 ## 🏗️ System Architecture
 
 ```
@@ -396,6 +403,39 @@ When HTTPS proxy is enabled:
 - Clients must use `https://` scheme when connecting to the proxy
 - Provides additional encryption between client and proxy server
 - Example: `curl -x https://group_id:password@gateway:8080 https://target.com`
+
+### Advanced Gateway Features
+
+#### Credential Management
+
+AnyProxy uses a simple key-value store for managing group credentials:
+
+```yaml
+gateway:
+  credential:
+    type: "file"                        # Options: "memory" (default) or "file"
+    file_path: "credentials/groups.json" # Path to credential storage file
+```
+
+**Memory Storage (Default)**:
+- Fast, in-memory key-value storage
+- Credentials lost on restart
+- Ideal for development/testing
+
+**File Storage**:
+- Persistent JSON storage
+- SHA256 password hashing
+- Thread-safe operations
+- Automatic file management
+- Ideal for production
+
+Example credential file structure (simple JSON map):
+```json
+{
+  "prod-group": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
+  "dev-group": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+}
+```
 
 ### Certificate Generation
 
