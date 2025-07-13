@@ -50,6 +50,7 @@ curl -x http://your_group_id:your_password@47.107.181.88:8080 http://httpbin.org
 
 ### 🚀 Triple Proxy Support
 - **HTTP Proxy**: Standard HTTP CONNECT, full browser compatibility
+  - Optional HTTPS proxy mode for encrypted client connections
 - **SOCKS5 Proxy**: Universal protocol support, low overhead
 - **TUIC Proxy**: UDP-based ultra-low latency proxy, 0-RTT connection
 
@@ -377,6 +378,24 @@ client:
     - "127.0.0.1"           # Localhost
     - "10.0.0.0/8"          # Private networks
 ```
+
+### HTTPS Proxy Configuration
+
+To enable HTTPS proxy (where clients connect to the proxy using HTTPS), configure TLS certificates for the HTTP proxy:
+
+```yaml
+gateway:
+  proxy:
+    http:
+      listen_addr: ":8080"
+      tls_cert: "certs/http-proxy.crt"  # Optional: Enable HTTPS proxy
+      tls_key: "certs/http-proxy.key"   # Optional: Enable HTTPS proxy
+```
+
+When HTTPS proxy is enabled:
+- Clients must use `https://` scheme when connecting to the proxy
+- Provides additional encryption between client and proxy server
+- Example: `curl -x https://group_id:password@gateway:8080 https://target.com`
 
 ### Certificate Generation
 

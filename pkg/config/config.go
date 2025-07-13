@@ -56,6 +56,8 @@ type SOCKS5Config struct {
 // HTTPConfig represents the configuration for the HTTP proxy
 type HTTPConfig struct {
 	ListenAddr string `yaml:"listen_addr"`
+	TLSCert    string `yaml:"tls_cert"` // Path to TLS certificate file for HTTPS proxy
+	TLSKey     string `yaml:"tls_key"`  // Path to TLS key file for HTTPS proxy
 }
 
 // TUICConfig represents the configuration for the TUIC proxy

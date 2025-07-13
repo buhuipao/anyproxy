@@ -30,6 +30,10 @@ gateway:
     # HTTP Proxy (Standard web browsing)
     http:
       listen_addr: ":8080"         # HTTP proxy port
+      # Optional: Enable HTTPS proxy by providing TLS certificates
+      # This makes the proxy itself use HTTPS (clients connect via HTTPS)
+      # tls_cert: "certs/http-proxy.crt"  # TLS certificate for HTTPS proxy
+      # tls_key: "certs/http-proxy.key"   # TLS private key for HTTPS proxy
     
     # SOCKS5 Proxy (General purpose, low overhead)
     socks5:
@@ -134,6 +138,10 @@ client:
 
 # 1. HTTP Proxy with Group Authentication:
 #    curl -x http://prod-env:prod_secret@gateway.example.com:8080 https://api.production.com
+
+# 1a. HTTPS Proxy with Group Authentication (if TLS enabled on HTTP proxy):
+#    curl -x https://prod-env:prod_secret@gateway.example.com:8080 https://api.production.com
+#    Note: Use https:// scheme when connecting to HTTPS proxy
 
 # 2. SOCKS5 Proxy with Group Authentication:
 #    curl --socks5 prod-env:prod_secret@gateway.example.com:1080 https://database.internal:5432

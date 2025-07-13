@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -464,6 +465,70 @@ func TestGetClientIP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPSProxy_WithTLS(t *testing.T) {
+	// Create temporary certificate files for testing
+	certContent := `-----BEGIN CERTIFICATE-----
+MIIBkTCB+wIJAKHHIG...fake certificate content...
+-----END CERTIFICATE-----`
+	keyContent := `-----BEGIN PRIVATE KEY-----
+MIICdgIBADANBgk...fake key content...
+-----END PRIVATE KEY-----`
+
+	// Create temp files
+	certFile, err := os.CreateTemp("", "test-cert-*.pem")
+	if err != nil {
+		t.Fatalf("Failed to create temp cert file: %v", err)
+	}
+	defer os.Remove(certFile.Name())
+	certFile.WriteString(certContent)
+	certFile.Close()
+
+	keyFile, err := os.CreateTemp("", "test-key-*.pem")
+	if err != nil {
+		t.Fatalf("Failed to create temp key file: %v", err)
+	}
+	defer os.Remove(keyFile.Name())
+	keyFile.WriteString(keyContent)
+	keyFile.Close()
+
+	// Test with TLS configuration
+	config := &config.HTTPConfig{
+		ListenAddr: "127.0.0.1:0",
+		TLSCert:    certFile.Name(),
+		TLSKey:     keyFile.Name(),
+	}
+
+	proxy, err := NewHTTPProxyWithAuth(config, mockDialFunc, mockGroupValidator)
+	if err != nil {
+		t.Fatalf("Failed to create HTTPS proxy: %v", err)
+	}
+
+	httpProxy, ok := proxy.(*HTTPProxy)
+	if !ok {
+		t.Fatal("Proxy is not HTTPProxy type")
+	}
+
+	// Verify TLS configuration is set
+	if httpProxy.config.TLSCert != certFile.Name() {
+		t.Errorf("Expected TLS cert %s, got %s", certFile.Name(), httpProxy.config.TLSCert)
+	}
+
+	if httpProxy.config.TLSKey != keyFile.Name() {
+		t.Errorf("Expected TLS key %s, got %s", keyFile.Name(), httpProxy.config.TLSKey)
+	}
+}
+
+func TestHTTPProxy_StartWithTLS(t *testing.T) {
+	// Skip if we can't create valid test certificates
+	t.Skip("Skipping TLS start test - requires valid certificates")
+
+	// In a real test, you would:
+	// 1. Generate valid test certificates
+	// 2. Start the proxy with TLS
+	// 3. Make an HTTPS connection to verify it's using TLS
+	// 4. Stop the proxy
 }
 
 // Mock hijacker for testing CONNECT

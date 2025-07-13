@@ -40,7 +40,8 @@ type HTTPProxy struct {
 
 // NewHTTPProxyWithAuth creates a new HTTP proxy with authentication
 func NewHTTPProxyWithAuth(config *config.HTTPConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupValidator func(string, string) bool) (utils.GatewayProxy, error) {
-	logger.Info("Creating HTTP proxy", "listen_addr", config.ListenAddr, "auth_enabled", "group-based")
+	tlsEnabled := config.TLSCert != "" && config.TLSKey != ""
+	logger.Info("Creating HTTP proxy", "listen_addr", config.ListenAddr, "auth_enabled", "group-based", "tls_enabled", tlsEnabled)
 
 	proxy := &HTTPProxy{
 		config:         config,
@@ -59,7 +60,7 @@ func NewHTTPProxyWithAuth(config *config.HTTPConfig, dialFn func(context.Context
 		IdleTimeout:  120 * time.Second,
 	}
 
-	logger.Info("HTTP proxy created successfully", "listen_addr", config.ListenAddr)
+	logger.Info("HTTP proxy created successfully", "listen_addr", config.ListenAddr, "tls_enabled", tlsEnabled)
 	return proxy, nil
 }
 
@@ -74,14 +75,24 @@ func (p *HTTPProxy) Start() error {
 	logger.Info("Starting HTTP proxy server", "listen_addr", p.config.ListenAddr)
 
 	go func() {
-		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		// Check if TLS is configured
+		if p.config.TLSCert != "" && p.config.TLSKey != "" {
+			logger.Info("Starting HTTPS proxy server with TLS", "listen_addr", p.config.ListenAddr, "cert", p.config.TLSCert, "key", p.config.TLSKey)
+			err = p.server.ListenAndServeTLS(p.config.TLSCert, p.config.TLSKey)
+		} else {
+			logger.Info("Starting HTTP proxy server without TLS", "listen_addr", p.config.ListenAddr)
+			err = p.server.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP proxy server error", "listen_addr", p.config.ListenAddr, "err", err)
 		} else {
 			logger.Info("HTTP proxy server stopped")
 		}
 	}()
 
-	logger.Info("HTTP proxy server started successfully", "listen_addr", p.config.ListenAddr)
+	logger.Info("HTTP proxy server started successfully", "listen_addr", p.config.ListenAddr, "tls_enabled", p.config.TLSCert != "" && p.config.TLSKey != "")
 	return nil
 }
 

@@ -22,6 +22,9 @@ gateway:
       listen_addr: ":1080"
     http:
       listen_addr: ":8080"
+      # Optional: Enable HTTPS proxy by providing TLS certificates
+      # tls_cert: "certs/http-proxy.crt"
+      # tls_key: "certs/http-proxy.key"
     tuic:
       listen_addr: ":9443"
   web:
