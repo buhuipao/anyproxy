@@ -13,6 +13,9 @@ import (
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/transport"
+
+	// Import SQLite driver for testing
+	_ "modernc.org/sqlite" // Pure Go SQLite driver (no CGO required)
 )
 
 // mockAddr implements net.Addr
@@ -319,17 +322,14 @@ func TestGateway_ClientManagement(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create credential manager for testing
-	credentialMgr, err := credential.NewManager(&credential.Config{Type: credential.Memory})
-	if err != nil {
-		t.Fatalf("Failed to create credential manager: %v", err)
-	}
+	credentialMgr, _ := credential.NewManager(&credential.Config{Type: credential.Memory})
 
 	gw := &Gateway{
 		clients:        make(map[string]*ClientConn),
 		groups:         make(map[string]*GroupInfo),
 		portForwardMgr: NewPortForwardManager(),
 		credentialMgr:  credentialMgr,
+		config:         &config.GatewayConfig{}, // Add config to prevent nil pointer
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -640,6 +640,7 @@ func TestGateway_HandleConnection(t *testing.T) {
 		groups:         make(map[string]*GroupInfo),
 		portForwardMgr: NewPortForwardManager(),
 		credentialMgr:  credentialMgr,
+		config:         &config.GatewayConfig{}, // Add config to prevent nil pointer
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -956,6 +957,52 @@ func TestGateway_NewGatewayCreation(t *testing.T) {
 			},
 			transportType: "invalid",
 			expectError:   true,
+		},
+		{
+			name: "gateway with file credential",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Credential: &config.CredentialConfig{
+						Type:     "file",
+						FilePath: "/tmp/test-creds.json",
+					},
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8080",
+						},
+					},
+				},
+			},
+			transportType: "grpc",
+			expectError:   false,
+		},
+		{
+			name: "gateway with db credential",
+			config: &config.Config{
+				Gateway: config.GatewayConfig{
+					ListenAddr:   ":8443",
+					AuthUsername: "test",
+					AuthPassword: "test",
+					Credential: &config.CredentialConfig{
+						Type: "db",
+						DB: &config.CredentialDBConfig{
+							Driver:     "sqlite", // modernc.org/sqlite uses "sqlite" not "sqlite3"
+							DataSource: ":memory:",
+							TableName:  "test_credentials",
+						},
+					},
+					Proxy: config.ProxyConfig{
+						HTTP: config.HTTPConfig{
+							ListenAddr: ":8080",
+						},
+					},
+				},
+			},
+			transportType: "grpc",
+			expectError:   false,
 		},
 	}
 

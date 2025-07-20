@@ -167,6 +167,77 @@ gateway:
 			configYAML: `[this is not a valid config structure]`,
 			wantErr:    true,
 		},
+		{
+			name: "config with file credential",
+			configYAML: `
+gateway:
+  listen_addr: "0.0.0.0:8443"
+  auth_username: "admin"
+  auth_password: "secret"
+  credential:
+    type: "file"
+    file_path: "/var/lib/anyproxy/credentials.json"
+  proxy:
+    http:
+      listen_addr: "127.0.0.1:8080"
+`,
+			wantErr: false,
+			expectedCfg: &Config{
+				Gateway: GatewayConfig{
+					ListenAddr:   "0.0.0.0:8443",
+					AuthUsername: "admin",
+					AuthPassword: "secret",
+					Credential: &CredentialConfig{
+						Type:     "file",
+						FilePath: "/var/lib/anyproxy/credentials.json",
+					},
+					Proxy: ProxyConfig{
+						HTTP: HTTPConfig{
+							ListenAddr: "127.0.0.1:8080",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "config with db credential",
+			configYAML: `
+gateway:
+  listen_addr: "0.0.0.0:8443"
+  auth_username: "admin"
+  auth_password: "secret"
+  credential:
+    type: "db"
+    db:
+      driver: "mysql"
+      data_source: "user:password@tcp(localhost:3306)/anyproxy"
+      table_name: "group_credentials"
+  proxy:
+    http:
+      listen_addr: "127.0.0.1:8080"
+`,
+			wantErr: false,
+			expectedCfg: &Config{
+				Gateway: GatewayConfig{
+					ListenAddr:   "0.0.0.0:8443",
+					AuthUsername: "admin",
+					AuthPassword: "secret",
+					Credential: &CredentialConfig{
+						Type: "db",
+						DB: &CredentialDBConfig{
+							Driver:     "mysql",
+							DataSource: "user:password@tcp(localhost:3306)/anyproxy",
+							TableName:  "group_credentials",
+						},
+					},
+					Proxy: ProxyConfig{
+						HTTP: HTTPConfig{
+							ListenAddr: "127.0.0.1:8080",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -512,19 +583,18 @@ func TestConfig_Validate(t *testing.T) {
 			errMsg:  "client group_id cannot be empty",
 		},
 		{
-			name: "client with empty group password",
+			name: "client with empty group password (now allowed)",
 			config: Config{
 				Client: ClientConfig{
 					ClientID:      "test-client",
 					GroupID:       "test-group",
-					GroupPassword: "",
+					GroupPassword: "", // Optional when using file/db credential storage
 				},
 			},
-			wantErr: true,
-			errMsg:  "client group_password cannot be empty",
+			wantErr: false, // Password is now optional
 		},
 		{
-			name: "client with both group fields empty",
+			name: "client with both group fields empty (only group_id is required)",
 			config: Config{
 				Client: ClientConfig{
 					ClientID:      "test-client",
@@ -533,7 +603,7 @@ func TestConfig_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "client group_id cannot be empty",
+			errMsg:  "client group_id cannot be empty", // Only group_id is required
 		},
 	}
 

@@ -57,23 +57,54 @@ gateway:
   # Credential management configuration
   # Controls how group authentication credentials are stored
   credential:
-    # Storage type: "memory" (default, data lost on restart) or "file" (persistent)
+    # Storage type: "memory" (default, data lost on restart), "file" (persistent), or "db" (database)
     type: "memory"
 
     # File path for storing credentials (only used when type is "file")
     # The file will store a simple JSON map of groupID -> passwordHash
     # file_path: "credentials/groups.json"
 
+    # Database configuration (only used when type is "db")
+    # db:
+    #   driver: "mysql"  # Database driver: mysql, postgres, sqlite3
+    #   data_source: "user:password@tcp(localhost:3306)/anyproxy"  # Connection string
+    #   table_name: "credentials"  # Optional, defaults to "credentials"
+
   # Alternative file-based credential configuration example:
   # credential:
   #   type: "file"
   #   file_path: "/var/lib/anyproxy/credentials.json"
 
+  # Alternative database-based credential configuration examples:
+  # MySQL:
+  # credential:
+  #   type: "db"
+  #   db:
+  #     driver: "mysql"
+  #     data_source: "root:password@tcp(localhost:3306)/anyproxy?charset=utf8mb4&parseTime=True&loc=Local"
+  #     table_name: "group_credentials"
+  
+  # PostgreSQL:
+  # credential:
+  #   type: "db"
+  #   db:
+  #     driver: "postgres"
+  #     data_source: "host=localhost user=postgres password=secret dbname=anyproxy port=5432 sslmode=disable"
+  #     table_name: "credentials"
+  
+  # SQLite:
+  # credential:
+  #   type: "db"
+  #   db:
+  #     driver: "sqlite"  # Note: modernc.org/sqlite uses "sqlite" not "sqlite3"
+  #     data_source: "/var/lib/anyproxy/credentials.db"
+  #     table_name: "credentials"
+
 # Client Configuration (Private Network)
 client:
   id: "production-client"          # Base client identifier
   group_id: "prod-env"             # Group ID for routing, also is the proxy authentication username (important!)
-  group_password: "prod_secret"    # Group password for proxy authentication
+  group_password: "prod_secret"    # Group password for proxy authentication (optional when using file/db credential storage)
   replicas: 3                      # Number of client replicas
   
   # Gateway Connection Settings
@@ -172,6 +203,16 @@ client:
 #    Gateway: https://gateway.example.com:8090 (admin / admin123)
 #    Client:  http://localhost:8091 (no auth by default)
 
+# Database Driver Installation (for DB credential storage):
+# 
+# SQLite:  go get modernc.org/sqlite (Pure Go, no CGO required)
+# MySQL:   go get github.com/go-sql-driver/mysql  
+# Postgres: go get github.com/lib/pq
+#
+# Note: Drivers are only needed if using DB credential storage.
+# The modernc.org/sqlite driver is recommended for SQLite as it's pure Go
+# and doesn't require CGO, making cross-compilation easier.
+
 # Transport Protocol Selection Guide:
 #
 # WebSocket (port 8443):
@@ -193,7 +234,12 @@ client:
 #
 # 2. Group Routing: Gateway routes traffic based on the authenticated group_id
 #
-# 3. Password Consistency: All clients with the same group_id must use identical group_password
+# 3. Password Management:
+#    - Memory storage: Clients must provide group_password, credentials are lost on restart
+#    - File/DB storage: group_password is optional in client config
+#      * Pre-configure credentials in file/database before starting clients
+#      * Clients can connect without password when credentials are already stored
+#      * If client provides password, it will update the stored credential
 #
 # 4. Simple Format: No complex username.group_id format - just group_id and group_password
 
@@ -205,3 +251,5 @@ client:
 # - Monitor web interface access logs
 # - Use firewall rules to restrict management port access
 # - Keep group_password secure as it's used for proxy authentication 
+# - For production: Use database credential storage for high availability
+# - Install database drivers only from trusted sources when using DB storage 

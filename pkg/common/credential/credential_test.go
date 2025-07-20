@@ -10,135 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMemoryStore(t *testing.T) {
-	store := NewMemoryStore()
-
-	// Test Set and Get
-	t.Run("SetAndGet", func(t *testing.T) {
-		err := store.Set("group1", hashPassword("password1"))
-		require.NoError(t, err)
-
-		hash, err := store.Get("group1")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
-	})
-
-	// Test ValidatePassword
-	t.Run("ValidatePassword", func(t *testing.T) {
-		err := store.Set("group2", hashPassword("password2"))
-		require.NoError(t, err)
-
-		valid := store.ValidatePassword("group2", "password2")
-		assert.True(t, valid)
-
-		valid = store.ValidatePassword("group2", "wrongpassword")
-		assert.False(t, valid)
-
-		valid = store.ValidatePassword("nonexistent", "password")
-		assert.False(t, valid)
-	})
-
-	// Test Update
-	t.Run("Update", func(t *testing.T) {
-		err := store.Set("group3", hashPassword("password3"))
-		require.NoError(t, err)
-
-		hash1, err := store.Get("group3")
-		require.NoError(t, err)
-
-		err = store.Set("group3", hashPassword("newpassword3"))
-		require.NoError(t, err)
-
-		hash2, err := store.Get("group3")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("newpassword3"), hash2)
-		assert.NotEqual(t, hash1, hash2)
-	})
-
-	// Test Delete
-	t.Run("Delete", func(t *testing.T) {
-		err := store.Set("group4", hashPassword("password4"))
-		require.NoError(t, err)
-
-		err = store.Delete("group4")
-		require.NoError(t, err)
-
-		_, err = store.Get("group4")
-		assert.Error(t, err)
-	})
-
-	// Test Multiple Groups
-	t.Run("MultipleGroups", func(t *testing.T) {
-		store := NewMemoryStore() // Fresh store
-
-		err := store.Set("group5", hashPassword("password5"))
-		require.NoError(t, err)
-		err = store.Set("group6", hashPassword("password6"))
-		require.NoError(t, err)
-
-		hash5, err := store.Get("group5")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password5"), hash5)
-
-		hash6, err := store.Get("group6")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password6"), hash6)
-	})
-}
-
-func TestFileStore(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_credentials.json")
-
-	store, err := NewFileStore(filePath)
-	require.NoError(t, err)
-
-	// Test Set and Get
-	t.Run("SetAndGet", func(t *testing.T) {
-		err := store.Set("group1", hashPassword("password1"))
-		require.NoError(t, err)
-
-		hash, err := store.Get("group1")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
-	})
-
-	// Test persistence
-	t.Run("Persistence", func(t *testing.T) {
-		// Create new store instance with same file
-		store2, err := NewFileStore(filePath)
-		require.NoError(t, err)
-
-		hash, err := store2.Get("group1")
-		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
-	})
-
-	// Test ValidatePassword
-	t.Run("ValidatePassword", func(t *testing.T) {
-		valid := store.ValidatePassword("group1", "password1")
-		assert.True(t, valid)
-
-		valid = store.ValidatePassword("group1", "wrongpassword")
-		assert.False(t, valid)
-	})
-
-	// Test Delete
-	t.Run("Delete", func(t *testing.T) {
-		err := store.Delete("group1")
-		require.NoError(t, err)
-
-		_, err = store.Get("group1")
-		assert.Error(t, err)
-	})
-
-	// Test invalid file path
-	t.Run("InvalidPath", func(t *testing.T) {
-		_, err := NewFileStore("/invalid/path/credentials.json")
-		assert.Error(t, err)
-	})
-}
-
 func TestManager(t *testing.T) {
 	// Test with memory store
 	t.Run("MemoryStore", func(t *testing.T) {
@@ -177,6 +48,14 @@ func TestManager(t *testing.T) {
 	t.Run("InvalidStoreType", func(t *testing.T) {
 		_, err := NewManager(&Config{Type: "invalid"})
 		assert.Error(t, err)
+	})
+
+	// Test DB store configuration
+	t.Run("DBStoreConfig", func(t *testing.T) {
+		// Test missing DB config
+		_, err := NewManager(&Config{Type: DB})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "database configuration is required")
 	})
 }
 

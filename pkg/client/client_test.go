@@ -239,18 +239,18 @@ func TestNewClient(t *testing.T) {
 			wantErr:       true,
 		},
 		{
-			name: "empty group password",
+			name: "empty group password (now allowed)",
 			config: &config.ClientConfig{
 				ClientID:      "test-client",
 				GroupID:       "test-group",
-				GroupPassword: "",
+				GroupPassword: "", // Optional when using file/db credential storage
 				Gateway: config.ClientGatewayConfig{
 					Addr: "localhost:8080",
 				},
 			},
 			transportType: "websocket",
 			replicaIdx:    0,
-			wantErr:       true,
+			wantErr:       false, // No longer an error
 		},
 	}
 

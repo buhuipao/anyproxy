@@ -70,7 +70,7 @@ curl -x http://your_group_id:your_password@47.107.181.88:8080 http://httpbin.org
 - **Round-Robin**: Automatic load distribution across clients in the same group
 - **Zero-Config**: No complex username formats, just group_id and password
 - **High Availability**: Seamless failover when clients disconnect
-- **Persistent Credentials**: Optional file-based credential storage for production use
+- **Persistent Credentials**: Optional file or database-based credential storage for production use
 
 ## 🏗️ System Architecture
 
@@ -408,18 +408,25 @@ When HTTPS proxy is enabled:
 
 #### Credential Management
 
-AnyProxy uses a simple key-value store for managing group credentials:
+AnyProxy uses a simple key-value store for managing group credentials with support for multiple storage backends:
 
 ```yaml
 gateway:
   credential:
-    type: "file"                        # Options: "memory" (default) or "file"
-    file_path: "credentials/groups.json" # Path to credential storage file
+    type: "file"                        # Options: "memory" (default), "file", or "db"
+    file_path: "credentials/groups.json" # Path to credential storage file (for file type)
+    
+    # Database configuration (for db type)
+    db:
+      driver: "mysql"                   # Database driver: mysql, postgres, sqlite
+      data_source: "user:pass@tcp(localhost:3306)/anyproxy"
+      table_name: "credentials"         # Optional, defaults to "credentials"
 ```
 
 **Memory Storage (Default)**:
 - Fast, in-memory key-value storage
 - Credentials lost on restart
+- Clients must provide group_password
 - Ideal for development/testing
 
 **File Storage**:
@@ -427,7 +434,16 @@ gateway:
 - SHA256 password hashing
 - Thread-safe operations
 - Automatic file management
-- Ideal for production
+- Good for simple deployments
+- Client group_password is optional (pre-configure in file)
+
+**Database Storage**:
+- High availability and scalability
+- Supports MySQL, PostgreSQL, SQLite
+- Automatic table creation
+- Prepared statements for performance
+- Ideal for production clusters
+- Client group_password is optional (pre-configure in database)
 
 Example credential file structure (simple JSON map):
 ```json
@@ -435,6 +451,40 @@ Example credential file structure (simple JSON map):
   "prod-group": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
   "dev-group": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
 }
+```
+
+Database credential table structure:
+```sql
+CREATE TABLE IF NOT EXISTS credentials (
+    group_id VARCHAR(255) PRIMARY KEY,
+    password_hash VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### Using Pre-configured Credentials
+
+With file or database storage, you can pre-configure credentials and clients don't need passwords:
+
+**1. Pre-configure credentials (example using SQLite):**
+```sql
+-- Insert pre-hashed password (SHA256 of "secret123")
+INSERT INTO credentials (group_id, password_hash) VALUES 
+('prod-env', '66b86ab0e95c36340b9dbeb8f52873dc85025c448e1cc1de0b72cf07bb091efc');
+```
+
+**2. Client configuration (no password needed):**
+```yaml
+client:
+  id: "prod-client"
+  group_id: "prod-env"
+  # group_password: not needed when using file/db storage
+```
+
+**3. Proxy authentication still uses the password:**
+```bash
+curl -x http://prod-env:secret123@gateway:8080 http://example.com
 ```
 
 ### Certificate Generation

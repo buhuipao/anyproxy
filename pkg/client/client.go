@@ -51,9 +51,8 @@ func NewClient(cfg *config.ClientConfig, transportType string, replicaIdx int) (
 	if cfg.GroupID == "" {
 		return nil, fmt.Errorf("group_id cannot be empty")
 	}
-	if cfg.GroupPassword == "" {
-		return nil, fmt.Errorf("group_password cannot be empty")
-	}
+	// Note: group_password is optional - when using file/db credential storage,
+	// credentials are pre-configured and client doesn't need to provide password
 
 	logger.Info("Creating new client", "client_id", cfg.ClientID, "replica_idx", replicaIdx, "gateway_addr", cfg.Gateway.Addr, "group_id", cfg.GroupID, "transport_type", transportType, "allowed_hosts_count", len(cfg.AllowedHosts), "forbidden_hosts_count", len(cfg.ForbiddenHosts), "open_ports_count", len(cfg.OpenPorts), "auth_enabled", cfg.Gateway.AuthUsername != "")
 

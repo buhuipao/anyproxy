@@ -68,17 +68,39 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	var credentialMgr *credential.Manager
 	var err error
 
-	// Convert config.CredentialConfig to credential.Config
+	// Create credential manager based on configuration
+	var credConfig *credential.Config
+
 	if cfg.Gateway.Credential != nil {
-		credConfig := &credential.Config{
-			Type:     credential.Type(cfg.Gateway.Credential.Type),
-			FilePath: cfg.Gateway.Credential.FilePath,
+		credConfig = &credential.Config{
+			Type: credential.Type(cfg.Gateway.Credential.Type),
 		}
-		credentialMgr, err = credential.NewManager(credConfig)
+
+		// Configure based on credential type
+		switch cfg.Gateway.Credential.Type {
+		case "file":
+			credConfig.FilePath = cfg.Gateway.Credential.FilePath
+		case "db":
+			if cfg.Gateway.Credential.DB != nil {
+				credConfig.DB = &credential.DBConfig{
+					Driver:     cfg.Gateway.Credential.DB.Driver,
+					DataSource: cfg.Gateway.Credential.DB.DataSource,
+					TableName:  cfg.Gateway.Credential.DB.TableName,
+				}
+			}
+		case "memory":
+			// No additional configuration needed for memory storage
+		default:
+			// Use memory as default for unknown types
+			logger.Warn("Unknown credential type, defaulting to memory", "type", cfg.Gateway.Credential.Type)
+			credConfig.Type = credential.Memory
+		}
 	} else {
-		// Default to memory storage
-		credentialMgr, err = credential.NewManager(&credential.Config{Type: credential.Memory})
+		// Default to memory storage when no credential config is provided
+		credConfig = &credential.Config{Type: credential.Memory}
 	}
+
+	credentialMgr, err = credential.NewManager(credConfig)
 
 	if err != nil {
 		cancel()
@@ -341,18 +363,24 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 
 	logger.Info("Client connected", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
 
-	// Register group credentials
-	if err := g.credentialMgr.RegisterGroup(groupID, password); err != nil {
-		logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
-		// Send the error message to the client using proper error message type
-		msgHandler := message.NewGatewayExtendedMessageHandler(conn)
-		if writeErr := msgHandler.WriteErrorMessage(err.Error()); writeErr != nil {
-			logger.Error("Failed to send error message to client", "client_id", clientID, "group_id", groupID, "original_error", err, "write_error", writeErr)
-		} else {
-			logger.Debug("Authentication error message sent to client", "client_id", clientID, "group_id", groupID, "error_message", err.Error())
+	// Only register group credentials if password is provided
+	// For file/db credential storage, passwords are pre-configured
+	if password != "" {
+		if err := g.credentialMgr.RegisterGroup(groupID, password); err != nil {
+			logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
+			// Send the error message to the client using proper error message type
+			msgHandler := message.NewGatewayExtendedMessageHandler(conn)
+			if writeErr := msgHandler.WriteErrorMessage(err.Error()); writeErr != nil {
+				logger.Error("Failed to send error message to client", "client_id", clientID, "group_id", groupID, "original_error", err, "write_error", writeErr)
+			} else {
+				logger.Debug("Authentication error message sent to client", "client_id", clientID, "group_id", groupID, "error_message", err.Error())
+			}
+			_ = conn.Close()
+			return
 		}
-		_ = conn.Close()
-		return
+		logger.Debug("Registered group credentials from client", "client_id", clientID, "group_id", groupID)
+	} else {
+		logger.Debug("No password provided by client, using pre-configured credentials", "client_id", clientID, "group_id", groupID)
 	}
 
 	// Initialize group info if it doesn't exist
@@ -473,11 +501,16 @@ func (g *Gateway) removeClient(clientID string) {
 		// Clean up empty group
 		if len(groupInfo.Clients) == 0 {
 			delete(g.groups, client.GroupID)
-			// Also remove from credential manager
-			if err := g.credentialMgr.RemoveGroup(client.GroupID); err != nil {
-				logger.Error("Failed to remove group from credential manager", "group_id", client.GroupID, "err", err)
+			// Only remove from credential manager if using memory storage
+			// For file/db storage, credentials are persistent
+			if g.config.Credential == nil || g.config.Credential.Type == "memory" || g.config.Credential.Type == "" {
+				if err := g.credentialMgr.RemoveGroup(client.GroupID); err != nil {
+					logger.Error("Failed to remove group from credential manager", "group_id", client.GroupID, "err", err)
+				}
+				logger.Debug("Removed group credentials from memory", "group_id", client.GroupID)
+			} else {
+				logger.Debug("Keeping persistent group credentials", "group_id", client.GroupID, "storage_type", g.config.Credential.Type)
 			}
-			logger.Debug("Removed empty group", "group_id", client.GroupID)
 		}
 	}
 	g.groupsMu.Unlock()

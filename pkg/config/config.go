@@ -38,8 +38,16 @@ type ProxyConfig struct {
 
 // CredentialConfig represents the credential storage configuration
 type CredentialConfig struct {
-	Type     string `yaml:"type"`      // "memory" or "file"
-	FilePath string `yaml:"file_path"` // Only used for file type
+	Type     string              `yaml:"type"`      // "memory", "file", or "db"
+	FilePath string              `yaml:"file_path"` // Only used for file type
+	DB       *CredentialDBConfig `yaml:"db"`        // Only used for db type
+}
+
+// CredentialDBConfig represents database configuration for credential storage
+type CredentialDBConfig struct {
+	Driver     string `yaml:"driver"`      // Database driver: mysql, postgres, sqlite
+	DataSource string `yaml:"data_source"` // Connection string
+	TableName  string `yaml:"table_name"`  // Table name for credentials (optional, defaults to "credentials")
 }
 
 // GatewayConfig represents the configuration for the proxy gateway
@@ -153,9 +161,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("client group_id cannot be empty")
 		}
 
-		if c.Client.GroupPassword == "" {
-			return fmt.Errorf("client group_password cannot be empty")
-		}
+		// Note: group_password is optional when using file or db credential storage
+		// In these cases, credentials are pre-configured in the storage
 	}
 
 	return nil
