@@ -1,13 +1,13 @@
 package websocket
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	"github.com/buhuipao/anyproxy/pkg/transport"
 	"github.com/gorilla/websocket"
 )
 
@@ -35,80 +35,81 @@ var (
 
 // writeMsg represents a message to be written
 type writeMsg struct {
-	msgType  int
-	data     []byte
-	callback chan error
+	msgType   int
+	data      []byte
+	callback  chan error
+	streamBuf streamBuffer // For StreamBuffer ownership transfer
+}
+
+// streamBuffer interface matches transport.StreamBuffer
+type streamBuffer interface {
+	Full() []byte
+	Release()
 }
 
 // Writer manages WebSocket write operations in a single goroutine
 type Writer struct {
 	conn         *websocket.Conn
-	ctx          context.Context
-	cancel       context.CancelFunc
 	once         sync.Once
 	wg           sync.WaitGroup
 	messageCount int64
 	bytesWritten int64
 	connectionID string
 	stopped      atomic.Bool
+	stopOnce     sync.Once
 	stopCh       chan struct{}
 	ch           chan *writeMsg
-	backupCh     chan *writeMsg
 	queueTimeout time.Duration
 	writeTimeout time.Duration
 }
 
 // NewWriterWithID creates a new WebSocket writer with specific connection ID
 func NewWriterWithID(conn *websocket.Conn, _ chan interface{}, connID string) *Writer {
-	logger.Debug("Creating new WebSocket writer", "connection_id", connID, "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr())
+	logger.Debug("Creating new WebSocket writer", "conn_id", connID, "remote_addr", conn.RemoteAddr(), "local_addr", conn.LocalAddr())
 
-	ctx, cancel := context.WithCancel(context.Background())
 	writer := &Writer{
 		conn:         conn,
-		ctx:          ctx,
-		cancel:       cancel,
 		connectionID: connID,
 		stopCh:       make(chan struct{}),
-		ch:           make(chan *writeMsg, 100),
-		backupCh:     make(chan *writeMsg, 100),
+		ch:           make(chan *writeMsg, transport.WriteChannelSize),
 		queueTimeout: 5 * time.Second,
 		writeTimeout: 10 * time.Second,
 	}
 
-	logger.Debug("WebSocket writer created successfully", "connection_id", connID)
+	logger.Debug("WebSocket writer created successfully", "conn_id", connID)
 
 	return writer
 }
 
 // Start starts the writer goroutine
 func (w *Writer) Start() {
-	logger.Info("Starting WebSocket writer", "connection_id", w.connectionID, "remote_addr", w.conn.RemoteAddr())
+	logger.Info("Starting WebSocket writer", "conn_id", w.connectionID, "remote_addr", w.conn.RemoteAddr())
 
 	w.wg.Add(1)
 	go w.run()
 
-	logger.Debug("WebSocket writer goroutine started", "connection_id", w.connectionID)
+	logger.Debug("WebSocket writer goroutine started", "conn_id", w.connectionID)
 }
 
 // Stop stops the writer and waits for completion
 func (w *Writer) Stop() {
-	logger.Info("Stopping WebSocket writer", "connection_id", w.connectionID, "messages_written", w.messageCount)
+	logger.Info("Stopping WebSocket writer", "conn_id", w.connectionID, "messages_written", atomic.LoadInt64(&w.messageCount))
 
 	w.once.Do(func() {
 		w.stopped.Store(true)
-		close(w.stopCh)
+		w.stopOnce.Do(func() { close(w.stopCh) })
 
 		// wait for writer to finish
-		logger.Debug("Waiting for WebSocket writer goroutine to finish", "connection_id", w.connectionID)
+		logger.Debug("Waiting for WebSocket writer goroutine to finish", "conn_id", w.connectionID)
 		w.wg.Wait()
 
 		// Close the WebSocket connection
-		logger.Debug("Closing WebSocket connection", "connection_id", w.connectionID)
+		logger.Debug("Closing WebSocket connection", "conn_id", w.connectionID)
 		if err := w.conn.Close(); err != nil {
-			logger.Debug("Error closing WebSocket connection (expected during shutdown)", "connection_id", w.connectionID, "err", err)
+			logger.Debug("Error closing WebSocket connection (expected during shutdown)", "conn_id", w.connectionID, "err", err)
 		}
 
-		logger.Info("WebSocket writer stopped", "connection_id", w.connectionID, "total_messages", w.messageCount, "total_bytes", w.bytesWritten)
+		logger.Info("WebSocket writer stopped", "conn_id", w.connectionID, "total_messages", w.messageCount, "total_bytes", w.bytesWritten)
 	})
 }
 
@@ -121,27 +122,16 @@ func (w *Writer) WriteMessage(data []byte) error {
 	msg := &writeMsg{
 		msgType:  websocket.BinaryMessage,
 		data:     data,
-		callback: make(chan error, 1),
+		callback: nil, // No callback = fire-and-forget
 	}
 
+	// 🔧 FIX: Block until channel has space or writer stopped
+	// Don't timeout and drop data - that causes unnecessary packet loss
 	select {
 	case w.ch <- msg:
-		// Successfully queued
-	default:
-		// Queue is full, use backup channel
-		select {
-		case w.backupCh <- msg:
-		case <-time.After(w.queueTimeout):
-			return ErrQueueFull
-		}
-	}
-
-	// Wait for write completion with timeout
-	select {
-	case err := <-msg.callback:
-		return err
-	case <-time.After(w.writeTimeout):
-		return ErrWriteTimeout
+		return nil
+	case <-w.stopCh:
+		return ErrStopped
 	}
 }
 
@@ -164,54 +154,101 @@ func (w *Writer) run() {
 
 		case msg := <-w.ch:
 			if err := w.handleWrite(msg); err != nil {
-				logger.Warn("Write error", "err", err)
-			}
-
-		case msg := <-w.backupCh:
-			if err := w.handleWrite(msg); err != nil {
-				logger.Warn("Write error from backup queue", "err", err)
+				w.fail("Write error", err)
+				return
 			}
 
 		case <-ticker.C:
 			// Send ping
 			if err := w.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				logger.Warn("Failed to set write deadline for ping", "connection_id", w.connectionID, "err", err)
+				logger.Warn("Failed to set write deadline for ping", "conn_id", w.connectionID, "err", err)
 			}
 			if err := w.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				logger.Warn("Ping error", "err", err)
+				w.fail("Ping error", err)
 				return
 			}
 		}
 	}
 }
 
+// fail stops the writer after a write error. Gorilla write errors are sticky,
+// so the connection is closed to make the reader and the peer see it is gone.
+func (w *Writer) fail(msg string, err error) {
+	logger.Warn(msg, "conn_id", w.connectionID, "err", err)
+	w.stopped.Store(true)
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	if err := w.conn.Close(); err != nil {
+		logger.Debug("Error closing WebSocket connection after write error", "conn_id", w.connectionID, "err", err)
+	}
+}
+
 // handleWrite writes a message and sends result to callback
 func (w *Writer) handleWrite(msg *writeMsg) error {
 	if err := w.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-		logger.Error("Failed to set write deadline", "connection_id", w.connectionID, "err", err)
+		logger.Error("Failed to set write deadline", "conn_id", w.connectionID, "err", err)
 	}
 
-	err := w.conn.WriteMessage(msg.msgType, msg.data)
+	var data []byte
+	if msg.streamBuf != nil {
+		// 🆕 Use StreamBuffer's Full() - no copy, direct reference
+		data = msg.streamBuf.Full()
+	} else {
+		data = msg.data
+	}
+
+	err := w.conn.WriteMessage(msg.msgType, data)
+
+	// Release StreamBuffer after write
+	if msg.streamBuf != nil {
+		msg.streamBuf.Release()
+	}
 
 	// Update statistics
 	if err == nil {
 		atomic.AddInt64(&w.messageCount, 1)
-		atomic.AddInt64(&w.bytesWritten, int64(len(msg.data)))
+		atomic.AddInt64(&w.bytesWritten, int64(len(data)))
 	}
 
-	// Send result to callback
-	select {
-	case msg.callback <- err:
-	default:
-		// Callback channel might be closed if timed out
+	// Send result to callback if present
+	if msg.callback != nil {
+		select {
+		case msg.callback <- err:
+		default:
+			// Callback channel might be closed if timed out
+		}
 	}
 
 	return err
 }
 
+// WriteStreamBuffer queues a StreamBuffer for writing
+// 🔧 ZERO-COPY: Takes ownership of the buffer and releases it after writing.
+func (w *Writer) WriteStreamBuffer(sb streamBuffer) error {
+	if w.stopped.Load() {
+		sb.Release()
+		return ErrStopped
+	}
+
+	msg := &writeMsg{
+		msgType:   websocket.BinaryMessage,
+		streamBuf: sb,
+		callback:  nil, // Fire-and-forget
+	}
+
+	// 🔧 FIX: Block until channel has space or writer stopped
+	// Don't timeout and drop data - that causes unnecessary packet loss
+	select {
+	case w.ch <- msg:
+		return nil
+	case <-w.stopCh:
+		sb.Release()
+		return ErrStopped
+	}
+}
+
 // handleShutdown drains remaining messages
 func (w *Writer) handleShutdown() {
-	logger.Debug("Draining remaining WebSocket messages", "connection_id", w.connectionID)
+	logger.Debug("Draining remaining WebSocket messages", "conn_id", w.connectionID)
 
 	drainedCount := 0
 
@@ -225,22 +262,7 @@ func (w *Writer) handleShutdown() {
 				drainedCount++
 			}
 		default:
-			goto drainBackup
-		}
-	}
-
-drainBackup:
-	// Drain backup channel
-	for {
-		select {
-		case msg := <-w.backupCh:
-			if err := w.handleWrite(msg); err != nil {
-				logger.Warn("Error writing message during drain", "err", err)
-			} else {
-				drainedCount++
-			}
-		default:
-			logger.Debug("WebSocket message drain completed", "connection_id", w.connectionID, "drained_messages", drainedCount)
+			logger.Debug("WebSocket message drain completed", "conn_id", w.connectionID, "drained_messages", drainedCount)
 			return
 		}
 	}

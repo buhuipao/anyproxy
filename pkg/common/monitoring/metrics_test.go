@@ -1,7 +1,9 @@
 package monitoring
 
 import (
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestDataConsistencyFix tests that the metrics fix ensures data consistency
@@ -47,10 +49,43 @@ func TestDataConsistencyFix(t *testing.T) {
 	}
 
 	// Verify no ghost connections were created
-	globalCount, actualCount, isConsistent := ValidateConnectionCounts()
+	globalCount, actualCount, isConsistent := globalManager.ValidateConnectionCounts()
 	if !isConsistent || globalCount != 0 || actualCount != 0 {
 		t.Errorf("FIX FAILED: Created ghost connections: global=%d, actual=%d", globalCount, actualCount)
 	}
 
 	t.Log("✅ Data consistency fix verified successfully")
+}
+
+// GetAllClientStats used to delete an offline client's connections under the
+// read lock, so concurrent polls crashed the process and decremented
+// ActiveConnections once per poll instead of once per connection.
+func TestOfflineClientConnectionsRemovedOnce(t *testing.T) {
+	m := &MetricsManager{
+		global:      &Metrics{},
+		clients:     make(map[string]*ClientMetrics),
+		connections: make(map[string]*ConnectionMetrics),
+	}
+	m.CreateConnection("conn-1", "client-1", "example.com:443")
+	m.clients["client-1"].LastSeen = time.Now().Add(-3 * time.Minute) // inactive, so reported offline
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = m.GetAllClientStats()
+		}()
+	}
+	wg.Wait()
+
+	if globalCount, actualCount, _ := m.ValidateConnectionCounts(); globalCount != 1 || actualCount != 1 {
+		t.Fatalf("reads must not change connections: global=%d actual=%d", globalCount, actualCount)
+	}
+
+	m.MarkClientOffline("client-1")
+	m.CloseConnection("conn-1")
+	if globalCount, actualCount, _ := m.ValidateConnectionCounts(); globalCount != 0 || actualCount != 0 {
+		t.Fatalf("connection must be removed exactly once: global=%d actual=%d", globalCount, actualCount)
+	}
 }

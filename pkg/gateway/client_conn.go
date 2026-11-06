@@ -11,9 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
+	"github.com/buhuipao/anyproxy/pkg/common/buffer"
 	"github.com/buhuipao/anyproxy/pkg/common/connection"
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
-	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
@@ -21,6 +23,19 @@ import (
 	"github.com/buhuipao/anyproxy/pkg/logger"
 	"github.com/buhuipao/anyproxy/pkg/transport"
 )
+
+// fullChannelGrace is how long the client's shared read loop waits for room in
+// a full TCP connection channel before it closes that connection. A channel
+// can fill only because its processor was not scheduled while the read loop
+// drained a backlog; that processor frees room well within this time. A
+// processor that stays blocked has a full BufferedConn behind it: about 7000
+// messages the user has not read.
+// The wait ends as soon as one slot frees. So only a user that reads nothing
+// for this long is closed. A user that keeps reading, but slower than the
+// target sends, is not closed: each of its messages can hold the read loop up
+// to this long, and the client's other connections move at its pace.
+// ponytail: per-connection flow control in the protocol would fix that.
+const fullChannelGrace = 100 * time.Millisecond
 
 // ClientConn client connection
 type ClientConn struct {
@@ -36,16 +51,22 @@ type ClientConn struct {
 	wg             sync.WaitGroup
 	portForwardMgr *PortForwardManager
 
-	// 🆕 Shared message handler
-	msgHandler message.ExtendedMessageHandler
+	// 🆕 SmartWriter for unified zero-copy writes with automatic degradation
+	smartWriter *buffer.SmartWriter
+
+	// Bandwidth limiter for per-group rate limiting (nil = unlimited)
+	bandwidthLimiter *rate.Limiter
 }
 
 // Conn connection structure
 type Conn struct {
-	ID        string
-	LocalConn net.Conn
-	Done      chan struct{}
-	once      sync.Once
+	ID         string
+	LocalConn  net.Conn
+	Done       chan struct{}
+	once       sync.Once // Protects LocalConn.Close()
+	doneOnce   sync.Once // 🛡️ Protects Done channel close
+	IsUDP      bool      // 🆕 Whether this is a UDP connection (for QUIC Datagram routing)
+	TargetAddr string    // 🆕 Target address (needed for UDP data messages)
 }
 
 // Stop stops the client connection and cleans up resources.
@@ -54,7 +75,7 @@ func (c *ClientConn) Stop() {
 		logger.Info("Initiating graceful client stop", "client_id", c.ID)
 
 		// Step 1: Cancel context
-		logger.Debug("Cancelling client context", "client_id", c.ID)
+		logger.Debug("Canceling client context", "client_id", c.ID)
 		c.cancel()
 
 		// Step 2: Get connection count
@@ -77,7 +98,12 @@ func (c *ClientConn) Stop() {
 		}
 		gracefulWait(500 * time.Millisecond)
 
-		// Step 3: 🆕 Close transport layer connection
+		// Step 3a: Stop SmartWriter's background datagram goroutine
+		if c.smartWriter != nil {
+			c.smartWriter.Close()
+		}
+
+		// Step 3b: Close transport layer connection
 		if c.Conn != nil {
 			logger.Debug("Closing transport connection", "client_id", c.ID)
 			if err := c.Conn.Close(); err != nil {
@@ -97,17 +123,17 @@ func (c *ClientConn) Stop() {
 			logger.Debug("All proxy connections closed", "client_id", c.ID)
 		}
 
-		// Step 5: Close all message channels
-		// Fix: Now using the same lock, no need to lock again
+		// Step 5: Remove all message channels. They are never closed, so the
+		// read loop can never send on a closed channel; their processors stop
+		// on the canceled context.
 		c.connMu.Lock()
 		channelCount := len(c.msgChans)
-		for connID, msgChan := range c.msgChans {
-			close(msgChan)
+		for connID := range c.msgChans {
 			delete(c.msgChans, connID)
 		}
 		c.connMu.Unlock()
 		if channelCount > 0 {
-			logger.Debug("Closed message channels", "client_id", c.ID, "channel_count", channelCount)
+			logger.Debug("Removed message channels", "client_id", c.ID, "channel_count", channelCount)
 		}
 
 		// Step 6: Wait for all goroutines to finish
@@ -139,25 +165,43 @@ func (c *ClientConn) dialNetwork(ctx context.Context, network, addr string) (net
 
 	logger.Debug("Creating new network connection", "client_id", c.ID, "conn_id", connID, "network", network, "address", addr)
 
-	// Create pipe to connect client and proxy
-	pipe1, pipe2 := net.Pipe()
+	// 🆕 Determine if this is a UDP connection for QUIC Datagram routing
+	isUDP := network == "udp" || network == "udp4" || network == "udp6"
+
+	// 🆕 Replace net.Pipe() with BufferedConnPair for non-blocking writes
+	bufSize := connection.TCPBufferSize // TCP: blocks when full (backpressure)
+	if isUDP {
+		bufSize = connection.UDPBufferSize // UDP: drop-oldest when full (prevents bufferbloat)
+	}
+	writerConn, readerConn := connection.NewBufferedConnPair(bufSize, isUDP)
+
+	if isUDP {
+		logger.Debug("Creating UDP connection (will use QUIC Datagram + BufferedConn)", "client_id", c.ID, "conn_id", connID, "target", addr, "buffer_size", bufSize)
+	} else {
+		logger.Debug("Creating TCP connection (BufferedConn)", "client_id", c.ID, "conn_id", connID, "target", addr, "buffer_size", bufSize)
+	}
 
 	// Create proxy connection
 	proxyConn := &Conn{
-		ID:        connID,
-		Done:      make(chan struct{}),
-		LocalConn: pipe2,
+		ID:         connID,
+		Done:       make(chan struct{}),
+		LocalConn:  readerConn, // handleConnection reads from here (non-blocking peer)
+		IsUDP:      isUDP,      // Mark UDP connections for QUIC Datagram routing
+		TargetAddr: addr,       // Store target address for UDP data messages
 	}
 
-	// Register connection
+	// Register the connection and its message channel before sending connect,
+	// so the connect_response always finds the channel. Until that response
+	// arrives, dialNetwork is the only reader of msgChan.
+	msgChan := make(chan map[string]interface{}, protocol.DefaultMessageChannelSize)
 	c.connMu.Lock()
 	c.Conns[connID] = proxyConn
+	c.msgChans[connID] = msgChan
+	// Register with monitoring under the same lock, so a Stop that removes
+	// this connection always finds the record to close
+	monitoring.CreateConnection(connID, c.ID, addr)
 	connCount := len(c.Conns)
 	c.connMu.Unlock()
-
-	// 🆕 Update connection metrics when connection is established
-	// Register connection with monitoring
-	monitoring.CreateConnection(connID, c.ID, addr)
 
 	logger.Debug("Connection registered", "client_id", c.ID, "conn_id", connID, "total_connections", connCount)
 
@@ -172,17 +216,69 @@ func (c *ClientConn) dialNetwork(ctx context.Context, network, addr string) (net
 
 	logger.Debug("Connect message sent to client", "client_id", c.ID, "conn_id", connID, "network", network, "address", addr)
 
-	// Start connection handling
-	c.wg.Add(1)
+	// Wait for connect_response with timeout
+	connectTimeout := protocol.DefaultConnectTimeout
+	timer := time.NewTimer(connectTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-proxyConn.Done:
+		// closeConnection or Stop closed the connection while we waited
+		return nil, fmt.Errorf("connection %s closed while waiting for connect_response", connID)
+	case msg := <-msgChan:
+		// The client always sends connect_response first for a connection
+		msgType, _ := msg["type"].(string)
+		if msgType != protocol.MsgTypeConnectResponse {
+			logger.Error("Unexpected message while waiting for connect_response", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+			c.closeConnection(connID)
+			return nil, fmt.Errorf("unexpected %q message while waiting for connect_response", msgType)
+		}
+		if success, _ := msg["success"].(bool); !success {
+			errorMsg, _ := msg["error"].(string)
+			logger.Error("Client failed to connect to target", "client_id", c.ID, "conn_id", connID, "err", errorMsg)
+			c.closeConnection(connID)
+			return nil, fmt.Errorf("client connection failed: %s", errorMsg)
+		}
+		logger.Debug("Connect response received, connection ready", "client_id", c.ID, "conn_id", connID)
+	case <-timer.C:
+		logger.Error("Timeout waiting for connect_response", "client_id", c.ID, "conn_id", connID, "timeout", connectTimeout)
+		c.abandonDial(connID)
+		return nil, fmt.Errorf("connect timeout after %v", connectTimeout)
+	case <-ctx.Done():
+		logger.Debug("Dial canceled while waiting for connect_response", "client_id", c.ID, "conn_id", connID, "err", ctx.Err())
+		c.abandonDial(connID)
+		return nil, ctx.Err()
+	case <-c.ctx.Done():
+		c.closeConnection(connID)
+		return nil, c.ctx.Err()
+	}
+
+	// NOW start message processing and connection handling
+	// (after Client has confirmed connection)
+	c.wg.Add(2)
+	go func() {
+		defer c.wg.Done()
+		c.processConnectionMessages(proxyConn.Done, msgChan)
+	}()
 	go func() {
 		defer c.wg.Done()
 		c.handleConnection(proxyConn)
 	}()
 
 	// Return wrapped connection with important address information wrapping
-	connWrapper := connection.NewConnWrapper(pipe1, network, addr)
+	// 🆕 writerConn is the protocol layer's end (SOCKS5 writes here, non-blocking)
+	connWrapper := connection.NewConnWrapper(writerConn, network, addr)
 	connWrapper.SetConnID(connID)
 	return connWrapper, nil
+}
+
+// abandonDial gives up on a dial that has no connect_response yet. The client
+// may still open the target later, so it is told to close the connection.
+func (c *ClientConn) abandonDial(connID string) {
+	if err := c.writeCloseMessage(connID); err != nil {
+		logger.Warn("Error sending close message", "client_id", c.ID, "conn_id", connID, "err", err)
+	}
+	c.closeConnection(connID)
 }
 
 // handleMessage handles messages from client
@@ -227,6 +323,9 @@ func (c *ClientConn) handleMessage() {
 			// Handle port forwarding request directly
 			logger.Info("Received port forwarding request", "client_id", c.ID)
 			c.handlePortForwardRequest(msg)
+		case protocol.MsgTypeHeartbeat:
+			// 🆕 Handle heartbeat message from client
+			c.handleHeartbeat(msg)
 		default:
 			logger.Warn("Unknown message type received", "client_id", c.ID, "message_type", msgType, "message_count", messageCount)
 		}
@@ -245,30 +344,32 @@ func (c *ClientConn) routeMessage(msg map[string]interface{}) {
 
 	msgType, _ := msg["type"].(string)
 
-	// For connect_response messages, create channel first if needed
-	if msgType == "connect_response" {
-		logger.Debug("Creating message channel for connect response", "client_id", c.ID, "conn_id", connID)
-		c.createMessageChannel(connID)
-	}
-
 	c.connMu.RLock()
 	msgChan, exists := c.msgChans[connID]
+	proxyConn := c.Conns[connID]
 	c.connMu.RUnlock()
+	isUDP := proxyConn != nil && proxyConn.IsUDP
 
 	if !exists {
 		// Connection doesn't exist, ignore message
-		logger.Debug("Ignoring message for non-existent connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+		// Only log non-data/close messages to avoid log spam during cleanup
+		if msgType != protocol.MsgTypeData && msgType != protocol.MsgTypeClose {
+			logger.Debug("Ignoring message for non-existent connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+		}
 		return
 	}
 
-	// Send message to connection's channel with minimal panic protection
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Debug("Recovered from send on closed channel, cleaning up connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
-			go c.closeConnection(connID)
-		}
-	}()
+	// 🔧 Queue depth monitoring to detect potential bufferbloat
+	// (logged once when the queue crosses 80%, not for every message above it)
+	queueDepth := len(msgChan)
+	queueCap := cap(msgChan)
+	if queueDepth == queueCap*80/100 {
+		logger.Warn("Message channel near capacity (potential bufferbloat)",
+			"client_id", c.ID, "conn_id", connID, "depth", queueDepth, "capacity", queueCap,
+			"usage_pct", queueDepth*100/queueCap)
+	}
 
+	// Send message to connection's channel (message channels are never closed)
 	select {
 	case msgChan <- msg:
 		// Successfully routed, don't log high-frequency data messages
@@ -276,44 +377,47 @@ func (c *ClientConn) routeMessage(msg map[string]interface{}) {
 			logger.Debug("Message routed successfully", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
 		}
 	case <-c.ctx.Done():
-		logger.Debug("Message routing cancelled due to context", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+		logger.Debug("Message routing canceled due to context", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
 	default:
-		// Channel is full - close connection to prevent protocol inconsistency
-		logger.Debug("Message channel full, cleaning up connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
-		go c.closeConnection(connID)
+		// Channel full. This read loop is shared by all connections of the
+		// client, so it waits at most fullChannelGrace.
+		if msgType == protocol.MsgTypeData && isUDP {
+			// UDP: drop the packet, loss is acceptable
+			return
+		}
+		timer := time.NewTimer(fullChannelGrace)
+		defer timer.Stop()
+		select {
+		case msgChan <- msg:
+			return
+		case <-c.ctx.Done():
+			return
+		case <-timer.C:
+		}
+		// TCP data or a control message: close the connection
+		logger.Warn("Message channel full, closing connection", "client_id", c.ID, "conn_id", connID, "message_type", msgType)
+		if err := c.writeCloseMessage(connID); err != nil {
+			logger.Warn("Error sending close message", "client_id", c.ID, "conn_id", connID, "err", err)
+		}
+		c.closeConnection(connID)
 	}
 }
 
-// createMessageChannel creates a message channel for connection
-func (c *ClientConn) createMessageChannel(connID string) {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
-
-	// Check if channel already exists
-	if _, exists := c.msgChans[connID]; exists {
-		return
-	}
-
-	msgChan := make(chan map[string]interface{}, protocol.DefaultMessageChannelSize)
-	c.msgChans[connID] = msgChan
-
-	// Start message processor for this connection
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.processConnectionMessages(connID, msgChan)
-	}()
-}
-
-// processConnectionMessages processes messages for a specific connection in order
-func (c *ClientConn) processConnectionMessages(_ string, msgChan chan map[string]interface{}) {
+// processConnectionMessages processes messages for a specific connection in order.
+// It stops once the connection is closed (done): nothing queued can be
+// delivered to a closed connection.
+func (c *ClientConn) processConnectionMessages(done <-chan struct{}, msgChan chan map[string]interface{}) {
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case msg, ok := <-msgChan:
-			if !ok {
+		case <-done:
+			return
+		case msg := <-msgChan:
+			select {
+			case <-done:
 				return
+			default:
 			}
 
 			msgType, _ := msg["type"].(string)
@@ -384,9 +488,11 @@ func (c *ClientConn) handleDataMessage(msg map[string]interface{}) {
 
 	n, err := proxyConn.LocalConn.Write(data)
 	if err != nil {
-		logger.Error("Failed to write data to local connection", "client_id", c.ID, "conn_id", connID, "data_bytes", len(data), "written_bytes", n, "err", err)
+		// The local end is closed: drop the data. handleConnection still reads
+		// the user's last bytes, sends the close message and cleans up;
+		// closing here would stop it before that.
+		logger.Debug("Dropping data for closed local connection", "client_id", c.ID, "conn_id", connID, "data_bytes", len(data), "written_bytes", n, "err", err)
 		// Do NOT update metrics for failed writes to avoid double counting
-		c.closeConnection(connID)
 		return
 	}
 
@@ -421,12 +527,9 @@ func (c *ClientConn) closeConnection(connID string) {
 		delete(c.Conns, connID)
 	}
 
-	// Also clean up message channel
-	if msgChan, exists := c.msgChans[connID]; exists {
-		delete(c.msgChans, connID)
-		// Need to close channel outside the lock to avoid deadlock
-		defer close(msgChan)
-	}
+	// Also remove the message channel. It is not closed: the read loop may
+	// still be sending to it, and its processor stops on proxyConn.Done.
+	delete(c.msgChans, connID)
 	c.connMu.Unlock()
 
 	// Only clean up if connection exists
@@ -438,20 +541,18 @@ func (c *ClientConn) closeConnection(connID string) {
 	// Close connection in monitoring
 	monitoring.CloseConnection(connID)
 
-	// Signal connection to stop (non-blocking, idempotent)
-	select {
-	case <-proxyConn.Done:
-		// Already closed, continue cleanup
-	default:
+	// 🛡️ Signal connection to stop using sync.Once to prevent double-close
+	proxyConn.doneOnce.Do(func() {
 		close(proxyConn.Done)
-	}
+	})
 
-	// Close local connection
-	logger.Debug("Closing local connection", "conn_id", proxyConn.ID)
-	err := proxyConn.LocalConn.Close()
-	if err != nil {
-		logger.Debug("Connection close error (expected during shutdown)", "conn_id", proxyConn.ID, "err", err)
-	}
+	// Close local connection (use once to ensure idempotent close)
+	proxyConn.once.Do(func() {
+		logger.Debug("Closing local connection", "conn_id", proxyConn.ID)
+		if err := proxyConn.LocalConn.Close(); err != nil {
+			logger.Debug("Connection close error (expected during shutdown)", "conn_id", proxyConn.ID, "err", err)
+		}
+	})
 
 	logger.Debug("Connection closed and cleaned up", "conn_id", proxyConn.ID, "client_id", c.ID)
 }
@@ -464,14 +565,12 @@ func (c *ClientConn) closeConnectionUnsafe(connID string) {
 	}
 
 	delete(c.Conns, connID)
+	monitoring.CloseConnection(connID)
 
-	// Signal connection to stop
-	select {
-	case <-proxyConn.Done:
-		// Already closed
-	default:
+	// 🛡️ Signal connection to stop using sync.Once to prevent double-close
+	proxyConn.doneOnce.Do(func() {
 		close(proxyConn.Done)
-	}
+	})
 
 	// Close actual connection
 	proxyConn.once.Do(func() {
@@ -502,39 +601,39 @@ func (c *ClientConn) handleConnectResponseMessage(msg map[string]interface{}) {
 
 		// Use different log levels and formats based on error type
 		if strings.Contains(strings.ToLower(errorMsg), "forbidden") || strings.Contains(strings.ToLower(errorMsg), "denied") {
-			logger.Error("Connection blocked by client security policy", "client_id", c.ID, "conn_id", connID, "error", errorMsg, "action", "Connection rejected by client due to security policy")
+			logger.Error("Connection blocked by client security policy", "client_id", c.ID, "conn_id", connID, "err", errorMsg, "action", "Connection rejected by client due to security policy")
 		} else if strings.Contains(strings.ToLower(errorMsg), "timeout") {
-			logger.Warn("Connection timeout", "client_id", c.ID, "conn_id", connID, "error", errorMsg, "action", "Connection timed out")
+			logger.Warn("Connection timeout", "client_id", c.ID, "conn_id", connID, "err", errorMsg, "action", "Connection timed out")
 		} else {
-			logger.Error("Connection failed", "client_id", c.ID, "conn_id", connID, "error", errorMsg, "action", "Client failed to establish connection")
+			logger.Error("Connection failed", "client_id", c.ID, "conn_id", connID, "err", errorMsg, "action", "Client failed to establish connection")
 		}
 
 		c.closeConnection(connID)
 	}
 }
 
-// handleConnection handles proxy connection data transfer
+// handleConnection handles proxy connection data transfer using StreamBuffer for zero-copy performance.
+// All transports (QUIC, WebSocket, gRPC) implement StreamBufferWriter, so this always uses the
+// optimized writev path to minimize memory copies.
 func (c *ClientConn) handleConnection(proxyConn *Conn) {
-	logger.Debug("Starting connection handler", "client_id", c.ID, "conn_id", proxyConn.ID)
+	logger.Debug("Starting StreamBuffer connection handler", "client_id", c.ID, "conn_id", proxyConn.ID)
 
-	// Increase buffer size for better performance
-	buffer := make([]byte, protocol.DefaultBufferSize)
 	totalBytes := 0
 	readCount := 0
 	startTime := time.Now()
 
 	defer func() {
 		elapsed := time.Since(startTime)
-		logger.Debug("Connection handler finished", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "read_operations", readCount, "duration", elapsed)
+		logger.Debug("StreamBuffer connection handler finished", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "read_operations", readCount, "duration", elapsed)
 	}()
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			logger.Debug("Connection handler stopping due to context cancellation", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
+			logger.Debug("StreamBuffer handler stopping due to context cancellation", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
 			return
 		case <-proxyConn.Done:
-			logger.Debug("Connection handler stopping - connection marked as done", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
+			logger.Debug("StreamBuffer handler stopping - connection marked as done", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
 			return
 		default:
 		}
@@ -545,34 +644,73 @@ func (c *ClientConn) handleConnection(proxyConn *Conn) {
 			deadline = ctxDeadline
 		}
 		if err := proxyConn.LocalConn.SetReadDeadline(deadline); err != nil {
-			logger.Warn("Failed to set read deadline", "client_id", c.ID, "conn_id", proxyConn.ID, "error", err)
+			logger.Warn("Failed to set read deadline", "client_id", c.ID, "conn_id", proxyConn.ID, "err", err)
 		}
 
-		n, err := proxyConn.LocalConn.Read(buffer)
+		// Acquire a StreamBuffer from the pool
+		sb := buffer.AcquireLarge() // 64KB for max UDP datagrams
+
+		// Log UDP connections entering read (to debug blocked reads)
+		if proxyConn.IsUDP && readCount == 0 {
+			logger.Debug("Gateway UDP: entering first Read", "client_id", c.ID, "conn_id", proxyConn.ID, "target", proxyConn.TargetAddr)
+		}
+
+		// Read directly into the StreamBuffer's data slice
+		n, err := proxyConn.LocalConn.Read(sb.DataSlice())
 		readCount++
 
+		// Log UDP read results
+		if proxyConn.IsUDP {
+			logger.Debug("Gateway UDP: Read returned", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes", n, "err", err, "read_count", readCount)
+		}
+
 		if n > 0 {
+			sb.SetDataLen(n)
 			totalBytes += n
-			// Only log larger transfers to reduce noise
-			if totalBytes%100000 == 0 || n > 10000 {
-				logger.Debug("Gateway read data from local connection", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes_this_read", n, "total_bytes", totalBytes, "read_count", readCount)
+
+			// Enforce bandwidth limit if configured
+			if c.bandwidthLimiter != nil {
+				if err := c.bandwidthLimiter.WaitN(c.ctx, n); err != nil {
+					sb.Release()
+					logger.Debug("Bandwidth limiter interrupted", "client_id", c.ID, "conn_id", proxyConn.ID, "err", err)
+					return
+				}
 			}
 
-			// 🆕 Optimization: Use binary format to avoid base64 encoding
-			writeErr := c.writeDataMessage(proxyConn.ID, buffer[:n])
+			// Always log UDP data transfers for debugging, reduce TCP logging
+			if proxyConn.IsUDP {
+				logger.Debug("Gateway read UDP data (StreamBuffer)", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes", n, "total_bytes", totalBytes, "target", proxyConn.TargetAddr)
+			} else if totalBytes%100000 == 0 || n > 10000 {
+				logger.Debug("Gateway read data (StreamBuffer)", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes_this_read", n, "total_bytes", totalBytes, "is_udp", proxyConn.IsUDP)
+			}
+
+			// Route UDP/TCP data using StreamBuffer
+			var writeErr error
+			if proxyConn.IsUDP {
+				// UDP data - transfer StreamBuffer ownership
+				logger.Debug("Gateway sending UDP data to client", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes", n, "target", proxyConn.TargetAddr)
+				writeErr = c.writeUDPDataMessageWithStreamBuffer(proxyConn.ID, proxyConn.TargetAddr, sb)
+				if writeErr == nil {
+					logger.Debug("Gateway UDP data sent successfully", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes", n)
+				}
+			} else {
+				// TCP data - transfer StreamBuffer ownership
+				writeErr = c.writeDataMessageWithStreamBuffer(proxyConn.ID, sb)
+			}
+
+			// Note: StreamBuffer ownership has been transferred, don't release here
+
 			if writeErr != nil {
-				logger.Error("Error writing data to client via transport", "client_id", c.ID, "conn_id", proxyConn.ID, "data_bytes", n, "total_bytes", totalBytes, "error", writeErr)
+				logger.Error("Error writing data via StreamBuffer", "client_id", c.ID, "conn_id", proxyConn.ID, "data_bytes", n, "total_bytes", totalBytes, "is_udp", proxyConn.IsUDP, "err", writeErr)
 				c.closeConnection(proxyConn.ID)
 				return
 			}
 
-			// Update connection metrics for data sent back to client (only after successful send)
+			// Update connection metrics
 			monitoring.UpdateConnectionBytes(proxyConn.ID, c.ID, int64(n), 0)
-
-			// Only log larger transfers
-			if n > 10000 {
-				logger.Debug("Gateway successfully sent large data chunk to client", "client_id", c.ID, "conn_id", proxyConn.ID, "bytes", n, "total_bytes", totalBytes)
-			}
+		} else {
+			// No data read, release the buffer
+			sb.Release()
 		}
 
 		if err != nil {
@@ -580,13 +718,11 @@ func (c *ClientConn) handleConnection(proxyConn *Conn) {
 				// Check if timeout is due to context cancellation
 				select {
 				case <-c.ctx.Done():
-					logger.Debug("Connection handler stopping due to context during timeout", "client_id", c.ID, "conn_id", proxyConn.ID)
 					return
 				case <-proxyConn.Done:
-					logger.Debug("Connection handler stopping - done channel during timeout", "client_id", c.ID, "conn_id", proxyConn.ID)
 					return
 				default:
-					continue // Continue timeout if context is still valid
+					continue
 				}
 			}
 
@@ -594,19 +730,17 @@ func (c *ClientConn) handleConnection(proxyConn *Conn) {
 			if strings.Contains(err.Error(), "use of closed network connection") ||
 				strings.Contains(err.Error(), "read/write on closed pipe") ||
 				strings.Contains(err.Error(), "connection reset by peer") {
-				logger.Debug("Local connection closed during read operation", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "read_count", readCount)
+				logger.Debug("Local connection closed during StreamBuffer read", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
 			} else if err != io.EOF {
-				logger.Error("Error reading from local connection", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "read_count", readCount, "error", err)
+				logger.Error("Error reading from local connection (StreamBuffer)", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "err", err)
 			} else {
-				logger.Debug("Local connection closed (EOF)", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes, "read_count", readCount)
+				logger.Debug("Local connection closed (EOF, StreamBuffer)", "client_id", c.ID, "conn_id", proxyConn.ID, "total_bytes", totalBytes)
 			}
 
-			// 🆕 Send close message to client
+			// Send close message to client
 			closeErr := c.writeCloseMessage(proxyConn.ID)
 			if closeErr != nil {
-				logger.Warn("Error sending close message to client", "client_id", c.ID, "conn_id", proxyConn.ID, "error", closeErr)
-			} else {
-				logger.Debug("Sent close message to client", "client_id", c.ID, "conn_id", proxyConn.ID)
+				logger.Warn("Error sending close message", "client_id", c.ID, "conn_id", proxyConn.ID, "err", closeErr)
 			}
 
 			c.closeConnection(proxyConn.ID)
@@ -717,5 +851,110 @@ func (c *ClientConn) sendPortForwardResponse(success bool, message string) {
 	binaryMsg := protocol.PackPortForwardResponseMessage(success, errorMsg, statuses)
 	if err := c.Conn.WriteMessage(binaryMsg); err != nil {
 		logger.Error("Failed to send port forward response", "client_id", c.ID, "err", err)
+	}
+}
+
+// handleDatagrams receives QUIC Datagram messages from the tunnel client and
+// routes them through the same per-connection sink used by the reliable
+// stream. This closes the latency gap for game streaming: without it, the
+// Sunshine→Moonlight direction was forced through the reliable stream's
+// congestion-controlled path, adding 1600ms+ of queuing latency and letting
+// the transport writeChan accumulate hundreds of MB of packet data.
+//
+// The datagram carries BinaryMsgTypeData framing (same as stream data). The
+// UDP-framed variant (BinaryMsgTypeUDPData) is also accepted for forward
+// compatibility, though the current client emits BinaryMsgTypeData.
+func (c *ClientConn) handleDatagrams(dr transport.DatagramReader) {
+	logger.Debug("Starting gateway datagram handler", "client_id", c.ID)
+	datagramCount := 0
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			logger.Debug("Gateway datagram handler stopping", "client_id", c.ID, "datagrams_processed", datagramCount)
+			return
+		default:
+		}
+
+		data, err := dr.ReceiveDatagram()
+		if err != nil {
+			// Any receive error on this QUIC connection means the peer is
+			// gone; spinning with `continue` would burn CPU until the defer
+			// in Gateway.handleConnection eventually calls client.Stop() and
+			// cancels c.ctx. Returning exits the goroutine immediately so the
+			// old client's resources can be GC'd without a transient CPU spike.
+			logger.Debug("Datagram receive error, exiting handler", "client_id", c.ID, "datagrams_processed", datagramCount, "err", err)
+			return
+		}
+
+		datagramCount++
+
+		version, msgType, payload, err := protocol.UnpackBinaryHeader(data)
+		if err != nil {
+			logger.Debug("Failed to parse datagram header", "client_id", c.ID, "err", err)
+			continue
+		}
+		if version != protocol.BinaryProtocolVersion {
+			logger.Debug("Datagram version mismatch", "client_id", c.ID, "version", version)
+			continue
+		}
+
+		switch msgType {
+		case protocol.BinaryMsgTypeData:
+			connID, udpPayload, err := protocol.UnpackDataMessage(payload)
+			if err != nil {
+				logger.Debug("Failed to unpack datagram data", "client_id", c.ID, "err", err)
+				continue
+			}
+			c.routeDatagramData(connID, udpPayload)
+		case protocol.BinaryMsgTypeUDPData:
+			connID, _, udpPayload, err := protocol.UnpackUDPDataMessage(payload)
+			if err != nil {
+				logger.Debug("Failed to unpack UDP datagram data", "client_id", c.ID, "err", err)
+				continue
+			}
+			c.routeDatagramData(connID, udpPayload)
+		default:
+			logger.Debug("Unexpected datagram message type", "client_id", c.ID, "msg_type", msgType)
+		}
+	}
+}
+
+// routeDatagramData writes the UDP payload to the proxy connection's
+// LocalConn, matching the routing used by the reliable-stream path in
+// handleDataMessage. Unknown conn IDs are dropped silently — they usually
+// represent late datagrams arriving after the connection was torn down.
+func (c *ClientConn) routeDatagramData(connID string, payload []byte) {
+	c.connMu.RLock()
+	proxyConn, ok := c.Conns[connID]
+	c.connMu.RUnlock()
+	if !ok {
+		return
+	}
+
+	if _, err := proxyConn.LocalConn.Write(payload); err != nil {
+		logger.Debug("Failed to write datagram payload to local conn", "client_id", c.ID, "conn_id", connID, "err", err)
+		return
+	}
+
+	monitoring.UpdateConnectionBytes(connID, c.ID, 0, int64(len(payload)))
+}
+
+// handleHeartbeat handles heartbeat message from client
+// This maintains the client's presence in gateway memory and keeps auth credentials active
+func (c *ClientConn) handleHeartbeat(msg map[string]interface{}) {
+	clientID, _ := msg["client_id"].(string)
+	timestamp, _ := msg["timestamp"].(int64)
+
+	// Log heartbeat received (use debug level to avoid log spam)
+	logger.Debug("Heartbeat received", "client_id", c.ID, "msg_client_id", clientID, "timestamp", timestamp)
+
+	// Update last heartbeat time (could be used for monitoring)
+	monitoring.UpdateClientHeartbeat(c.ID, c.GroupID)
+
+	// Send heartbeat acknowledgment back to client
+	ackMsg := protocol.PackHeartbeatAckMessage(timestamp)
+	if err := c.Conn.WriteMessage(ackMsg); err != nil {
+		logger.Warn("Failed to send heartbeat ack", "client_id", c.ID, "err", err)
 	}
 }

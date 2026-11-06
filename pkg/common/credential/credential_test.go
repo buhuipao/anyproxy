@@ -108,8 +108,8 @@ func testManagerOperations(t *testing.T, mgr *Manager) {
 		assert.False(t, valid)
 	})
 
-	// Test Update Password
-	t.Run("UpdatePassword", func(t *testing.T) {
+	// A registered password cannot be replaced by another one
+	t.Run("RejectDifferentPassword", func(t *testing.T) {
 		err := mgr.RegisterGroup("updatetest", "oldpassword")
 		require.NoError(t, err)
 
@@ -117,29 +117,32 @@ func testManagerOperations(t *testing.T, mgr *Manager) {
 		assert.True(t, valid)
 
 		err = mgr.RegisterGroup("updatetest", "newpassword")
-		require.NoError(t, err)
+		assert.Error(t, err)
 
 		valid = mgr.ValidateGroup("updatetest", "oldpassword")
-		assert.False(t, valid)
+		assert.True(t, valid)
 
 		valid = mgr.ValidateGroup("updatetest", "newpassword")
-		assert.True(t, valid)
+		assert.False(t, valid)
+
+		// After the group is removed, a new password can be registered
+		require.NoError(t, mgr.RemoveGroup("updatetest"))
+		require.NoError(t, mgr.RegisterGroup("updatetest", "newpassword"))
+		assert.True(t, mgr.ValidateGroup("updatetest", "newpassword"))
 	})
 }
 
-func TestHashPassword(t *testing.T) {
-	// Test consistent hashing
-	password := "testpassword123"
-	hash1 := hashPassword(password)
-	hash2 := hashPassword(password)
-	assert.Equal(t, hash1, hash2)
+// Store errors (file or DB driver details) are sent to the remote client, so the
+// returned error must not contain them
+func TestRegisterGroupHidesStoreErrors(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "credentials.json")
+	mgr, err := NewManager(&Config{Type: File, FilePath: filePath})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filePath, []byte("not json"), 0600))
 
-	// Test different passwords produce different hashes
-	hash3 := hashPassword("differentpassword")
-	assert.NotEqual(t, hash1, hash3)
-
-	// Test hash format
-	assert.Len(t, hash1, 64) // SHA256 produces 32 bytes = 64 hex characters
+	err = mgr.RegisterGroup("group1", "password1")
+	require.Error(t, err)
+	assert.Equal(t, "authentication failed: credential store unavailable", err.Error())
 }
 
 func TestConcurrency(t *testing.T) {

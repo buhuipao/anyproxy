@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/sagernet/quic-go"
 
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -18,6 +18,9 @@ import (
 const (
 	authStatusSuccess = "success"
 	authStatusFailed  = "failed"
+
+	// alpnProtocol is the TLS ALPN protocol that client and server must agree on
+	alpnProtocol = "anyproxy-quic"
 )
 
 // quicTransport implements the Transport interface for QUIC
@@ -62,7 +65,7 @@ func (t *quicTransport) ListenAndServe(addr string, handler func(transport.Conne
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"anyproxy-quic"},
+		NextProtos:   []string{alpnProtocol},
 		MinVersion:   tls.VersionTLS12, // Enforce minimum TLS 1.2
 	}
 
@@ -78,7 +81,7 @@ func (t *quicTransport) ListenAndServeWithTLS(addr string, handler func(transpor
 	// Ensure NextProtos is set for QUIC
 	if tlsConfig.NextProtos == nil {
 		tlsConfig = tlsConfig.Clone()
-		tlsConfig.NextProtos = []string{"anyproxy-quic"}
+		tlsConfig.NextProtos = []string{alpnProtocol}
 	}
 
 	return t.listenAndServe(addr, handler, tlsConfig)
@@ -97,10 +100,16 @@ func (t *quicTransport) listenAndServe(addr string, handler func(transport.Conne
 
 	logger.Info("Starting QUIC server", "listen_addr", addr)
 
-	// 🚨 Fix: Configure QUIC heartbeat and idle timeout to prevent unexpected connection drops
+	// 🚨 Fix: Configure QUIC heartbeat and idle timeout for fast disconnect detection
+	// 🔧 PERFORMANCE: Increased flow control windows for high-throughput streaming (1Gbps+)
 	quicConfig := &quic.Config{
-		KeepAlivePeriod: 30 * time.Second, // Send PING heartbeat every 30 seconds
-		MaxIdleTimeout:  5 * time.Minute,  // 5-minute idle timeout
+		KeepAlivePeriod:                5 * time.Second,   // Send PING heartbeat every 5 seconds (fast detection)
+		MaxIdleTimeout:                 15 * time.Second,  // 15-second idle timeout (fast client detection)
+		InitialStreamReceiveWindow:     16 * 1024 * 1024,  // 16MB per stream (increased from 6MB)
+		MaxStreamReceiveWindow:         32 * 1024 * 1024,  // 32MB max per stream
+		InitialConnectionReceiveWindow: 50 * 1024 * 1024,  // 50MB per connection (increased from 15MB)
+		MaxConnectionReceiveWindow:     100 * 1024 * 1024, // 100MB max per connection
+		EnableDatagrams:                true,              // Enable QUIC Datagram for low-latency UDP
 	}
 
 	// Create QUIC listener
@@ -111,7 +120,7 @@ func (t *quicTransport) listenAndServe(addr string, handler func(transport.Conne
 	}
 	t.listener = listener
 
-	logger.Info("QUIC listener created", "addr", addr, "keepalive_period", "30s", "idle_timeout", "5m")
+	logger.Info("QUIC listener created", "addr", addr, "keepalive_period", "5s", "idle_timeout", "15s")
 
 	// Start accepting connections in a goroutine
 	go func() {
@@ -138,7 +147,7 @@ func (t *quicTransport) listenAndServe(addr string, handler func(transport.Conne
 	return nil
 }
 
-// handleConnection handles a new QUIC connection
+// handleConnection handles a new QUIC connection (sagernet/quic-go: Connection is interface)
 func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Debug("New QUIC connection accepted", "remote_addr", conn.RemoteAddr())
 
@@ -160,6 +169,7 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Debug("QUIC stream accepted")
 
 	// 🚨 Fix: Wait for and validate authentication message
+	// sagernet/quic-go: AcceptStream returns Stream interface
 	clientID, groupID, groupPassword, err := t.authenticateConnection(stream)
 	if err != nil {
 		logger.Warn("QUIC connection rejected during authentication", "remote_addr", conn.RemoteAddr(), "err", err)
@@ -172,6 +182,7 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 	logger.Info("Client connected via QUIC", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
 
 	// Create server connection
+	// sagernet/quic-go: stream is Stream interface, conn is Connection interface
 	quicConn := newQUICServerConnection(stream, conn, clientID, groupID, groupPassword)
 
 	// Call connection handler, don't use recover to hide issues
@@ -186,13 +197,14 @@ func (t *quicTransport) handleConnection(conn quic.Connection) {
 }
 
 // authenticateConnection authenticates QUIC connection and extracts client information
+// sagernet/quic-go: Stream is interface type
 func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, groupID, password string, err error) {
 	// Create temporary connection to read authentication message
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	tempConn := &quicConnection{
-		stream:    stream,
+		stream:    stream, // sagernet/quic-go: Stream is interface
 		readChan:  make(chan []byte, 1),
 		errorChan: make(chan error, 1),
 		ctx:       ctx,
@@ -200,13 +212,9 @@ func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, gr
 		isClient:  false,
 	}
 
-	// 🆕 Ensure temporary channels are closed
-	defer func() {
-		close(tempConn.readChan)
-		close(tempConn.errorChan)
-	}()
-
 	// Start receive loop to read the first message
+	// Do not close readChan/errorChan: this goroutine may still send after
+	// we return. cancel() lets it exit; the GC frees the channels.
 	go func() {
 		data, readErr := tempConn.readData()
 		if readErr != nil {
@@ -263,17 +271,21 @@ func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, gr
 	}
 
 	// Verify authentication information (Gateway transport layer auth)
+	// Priority: 1. Dynamic client auth  2. Fixed gateway auth  3. No auth (dev mode)
 	var responseStatus, responseReason string
-	if t.authConfig != nil && t.authConfig.Username != "" {
-		if username != t.authConfig.Username || password != t.authConfig.Password {
-			responseStatus = authStatusFailed
-			responseReason = "invalid credentials"
-		} else {
-			responseStatus = authStatusSuccess
-			logger.Debug("QUIC client authentication successful", "client_id", clientID)
-		}
-	} else {
+
+	authenticated, isClient := transport.ValidateCredentials(t.authConfig, clientID, username, password)
+	if isClient {
+		logger.Debug("QUIC client authenticated via dynamic credentials", "client_id", clientID)
+	} else if authenticated {
+		logger.Debug("QUIC client authenticated via fixed/no-auth credentials", "client_id", clientID)
+	}
+
+	if authenticated {
 		responseStatus = authStatusSuccess
+	} else {
+		responseStatus = authStatusFailed
+		responseReason = "invalid credentials"
 	}
 
 	// Build response message
@@ -286,7 +298,7 @@ func (t *quicTransport) authenticateConnection(stream quic.Stream) (clientID, gr
 		return "", "", "", errors.New(responseReason)
 	}
 
-	logger.Debug("QUIC authentication completed successfully", "client_id", clientID, "group_id", groupID)
+	logger.Info("QUIC authentication completed successfully", "client_id", clientID, "group_id", groupID)
 
 	return clientID, groupID, groupPassword, nil
 }
@@ -311,7 +323,7 @@ func (t *quicTransport) Close() error {
 
 	// Step 1: Cancel context to stop accept loops
 	if t.cancel != nil {
-		logger.Debug("Cancelling QUIC server context")
+		logger.Debug("Canceling QUIC server context")
 		t.cancel()
 	}
 

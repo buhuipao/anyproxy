@@ -159,21 +159,28 @@ func (s *webSocketTransport) handleWebSocket(w http.ResponseWriter, r *http.Requ
 	logger.Debug("WebSocket connection attempt", "client_id", clientID, "group_id", groupID, "remote_addr", r.RemoteAddr)
 
 	// Authentication check (Gateway transport layer auth)
-	if s.authConfig != nil && s.authConfig.Username != "" {
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			logger.Warn("WebSocket connection rejected: missing authentication", "client_id", clientID, "remote_addr", r.RemoteAddr)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	// Priority: 1. Dynamic client auth  2. Fixed gateway auth  3. No auth (dev mode)
+	username, password, hasBasicAuth := r.BasicAuth()
 
-		if username != s.authConfig.Username || password != s.authConfig.Password {
-			logger.Warn("WebSocket connection rejected: invalid credentials", "client_id", clientID, "username", username, "remote_addr", r.RemoteAddr)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	// When auth is configured but no Basic Auth header provided, reject early
+	authConfigured := s.authConfig != nil && (s.authConfig.Username != "" || s.authConfig.ClientValidator != nil)
+	if authConfigured && !hasBasicAuth {
+		logger.Warn("WebSocket connection rejected: missing authentication", "client_id", clientID, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-		logger.Debug("Client authentication successful", "client_id", clientID)
+	authenticated, isClient := transport.ValidateCredentials(s.authConfig, clientID, username, password)
+	if isClient {
+		logger.Debug("WebSocket client authenticated via dynamic credentials", "client_id", clientID)
+	} else if authenticated {
+		logger.Debug("WebSocket client authenticated via fixed/no-auth credentials", "client_id", clientID)
+	}
+
+	if !authenticated {
+		logger.Warn("WebSocket connection rejected: invalid credentials", "client_id", clientID, "username", username, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
 
 	// Upgrade to WebSocket

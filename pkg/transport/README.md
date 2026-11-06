@@ -189,7 +189,8 @@ if err := client.Connect(); err != nil {
 - Uses protocol buffers for message serialization
 - Supports bidirectional streaming
 - Requires protobuf code generation
-- Metadata used for authentication
+- Metadata used for authentication; the server sends response headers once it accepts the stream, and `DialWithConfig` waits for them, so a rejected client gets an `Unauthenticated` dial error. Gateways without this send headers only with their first message, so against them the dial waits 10s and then proceeds
+- Closing the server-side connection flushes queued messages and then ends the RPC
 
 ### QUIC Transport
 - Always requires TLS (no plaintext mode)

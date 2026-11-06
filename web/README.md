@@ -159,7 +159,7 @@ Complete bilingual support implemented via `i18n.js`:
 ### Automatic Cleanup Process
 - **Offline Detection**: Clients marked offline after 2 minutes of inactivity
 - **Cleanup Interval**: Runs every 10 seconds for responsive updates
-- **Stale Connection Removal**: Automatic cleanup of connections from offline clients
+- **Stale Connection Removal**: A client's connection records are removed when the gateway removes that client (disconnect); clients that are only inactive keep them
 - **Metrics Validation**: Periodic validation and auto-correction of connection counts
 - **Memory Management**: Efficient cleanup to prevent memory leaks
 

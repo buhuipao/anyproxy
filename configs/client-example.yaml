@@ -1,0 +1,54 @@
+# AnyProxy Client Configuration Example
+# This is for direct client usage (not through tunnel-proxy-client desktop app)
+
+log:
+  level: info
+  format: text
+  output: stdout
+
+client:
+  # Client identification
+  id: "client-001"
+  group_id: "your-group-id"        # From platform dashboard
+  group_password: "your-password"  # From platform dashboard
+  
+  # Number of parallel connections (for load balancing)
+  replicas: 1
+  
+  # Gateway connection
+  gateway:
+    addr: "gw-us-west.tunnel-proxy.com:8443"
+    transport_type: "quic"  # quic, websocket, grpc
+    tls_cert: |
+      -----BEGIN CERTIFICATE-----
+      ... (gateway's TLS certificate)
+      -----END CERTIFICATE-----
+    # Gateway authentication (if required)
+    # auth_username: "client"
+    # auth_password: "client-password"
+  
+  # Security rules
+  # Dial IPv6 targets too (default false). IPv4 rules do not cover IPv6
+  # addresses, so before turning it on also forbid IPv6 ranges such as
+  # ::1, ::, fe80::/10, fc00::/7 and fd00:ec2::254.
+  allow_ipv6: false
+  forbidden_hosts:
+    - "*.internal.company.com"
+    - "192.168.0.0/16"   # CIDR rules also catch names that resolve into the range
+    - "10.0.0.0/8"
+    - "fc00::/7"         # IPv6 private networks, for allow_ipv6: true
+  
+  allowed_hosts: []  # Empty means allow all (except forbidden)
+  
+  # Port forwarding (optional)
+  open_ports:
+    # Forward gateway:8080 -> localhost:3000
+    # - remote_port: 8080
+    #   local_port: 3000
+    #   local_host: "localhost"
+    #   protocol: "tcp"
+  
+  # Local web interface (optional)
+  web:
+    enabled: false
+    listen_addr: "127.0.0.1:9091"

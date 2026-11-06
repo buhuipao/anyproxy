@@ -8,16 +8,14 @@ import (
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
-	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
 )
 
 func TestNewClientWebServer(t *testing.T) {
 	addr := ":8081"
 	staticDir := "./static"
 	clientID := "test-client"
-	rateLimiter := ratelimit.NewRateLimiter(nil)
 
-	server := NewClientWebServer(addr, staticDir, clientID, rateLimiter)
+	server := NewClientWebServer(addr, staticDir, clientID)
 
 	if server == nil {
 		t.Fatal("NewClientWebServer should return non-nil server")
@@ -35,17 +33,13 @@ func TestNewClientWebServer(t *testing.T) {
 		t.Errorf("Expected client ID %s, got %s", clientID, server.clientID)
 	}
 
-	if server.rateLimiter != rateLimiter {
-		t.Error("Rate limiter should be set")
-	}
-
 	if server.startTime.IsZero() {
 		t.Error("Start time should be set")
 	}
 }
 
 func TestWebServer_SetActualClientID(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "original-client", nil)
+	server := NewClientWebServer(":8081", "", "original-client")
 
 	// Initially should only have the original client ID
 	clientIDs := server.getClientIDs()
@@ -83,7 +77,7 @@ func TestWebServer_SetActualClientID(t *testing.T) {
 }
 
 func TestWebServer_HandleStatus(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	// Add some test metrics
 	monitoring.UpdateClientMetrics("test-client", "group1", 1000, 2000, false)
@@ -124,7 +118,7 @@ func TestWebServer_HandleStatus(t *testing.T) {
 }
 
 func TestWebServer_HandleStatusWithActualClientID(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 	actualID := "runtime-client-123"
 	server.SetActualClientID(actualID)
 
@@ -153,11 +147,13 @@ func TestWebServer_HandleStatusWithActualClientID(t *testing.T) {
 }
 
 func TestWebServer_HandleConnectionMetrics(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	// Add some test connection data
-	monitoring.UpdateConnectionMetrics("conn1", "test-client", "example.com:80", 1000, 2000, "active")
-	monitoring.UpdateConnectionMetrics("conn2", "test-client", "google.com:443", 500, 1000, "active") // Keep it active so it won't be removed
+	monitoring.CreateConnection("conn1", "test-client", "example.com:80")
+	monitoring.UpdateConnectionBytes("conn1", "test-client", 1000, 2000)
+	monitoring.CreateConnection("conn2", "test-client", "google.com:443")
+	monitoring.UpdateConnectionBytes("conn2", "test-client", 500, 1000) // Keep it active so it won't be removed
 
 	// Test getting all connections
 	req := httptest.NewRequest("GET", "/api/metrics/connections", nil)
@@ -200,10 +196,11 @@ func TestWebServer_HandleConnectionMetrics(t *testing.T) {
 }
 
 func TestWebServer_HandleConnectionMetricsWithSpecificID(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	// Add test connection
-	monitoring.UpdateConnectionMetrics("specific-conn", "test-client", "example.com:80", 1000, 2000, "active")
+	monitoring.CreateConnection("specific-conn", "test-client", "example.com:80")
+	monitoring.UpdateConnectionBytes("specific-conn", "test-client", 1000, 2000)
 
 	// Test getting specific connection
 	req := httptest.NewRequest("GET", "/api/metrics/connections?conn_id=specific-conn", nil)
@@ -230,7 +227,7 @@ func TestWebServer_HandleConnectionMetricsWithSpecificID(t *testing.T) {
 }
 
 func TestWebServer_HandleConnectionMetricsNotFound(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	// Test getting non-existent connection
 	req := httptest.NewRequest("GET", "/api/metrics/connections?conn_id=nonexistent", nil)
@@ -244,7 +241,7 @@ func TestWebServer_HandleConnectionMetricsNotFound(t *testing.T) {
 }
 
 func TestWebServer_RespondJSON(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	data := map[string]interface{}{
 		"test": "value",
@@ -273,7 +270,7 @@ func TestWebServer_RespondJSON(t *testing.T) {
 }
 
 func TestWebServer_CorsMiddleware(t *testing.T) {
-	server := NewClientWebServer(":8081", "", "test-client", nil)
+	server := NewClientWebServer(":8081", "", "test-client")
 
 	// Test with regular request
 	handler := server.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

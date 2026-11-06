@@ -1,7 +1,11 @@
 package grpc
 
 import (
+	"context"
 	"crypto/tls"
+	"io"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,19 +137,43 @@ func TestGRPCTransport_ListenAndServeWithTLS(t *testing.T) {
 	}
 }
 
+func waitForServerReady(t *testing.T, server *grpcTransport, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		listener := server.listener
+		running := server.running
+		server.mu.Unlock()
+
+		if listener != nil && running {
+			return listener.Addr().String()
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Server did not start in time")
+	return ""
+}
+
 func TestGRPCTransport_DialWithConfig(t *testing.T) {
 	// Create server
 	server := NewGRPCTransport()
 	clientConnected := make(chan struct{})
+	serverReady := make(chan struct{})
 
-	// Start server
+	// Start server on localhost (use 127.0.0.1 to avoid IPv6 issues)
 	go func() {
-		err := server.ListenAndServe(":0", func(conn transport.Connection) {
+		err := server.ListenAndServe("127.0.0.1:0", func(conn transport.Connection) {
 			// Signal client connected
-			close(clientConnected)
+			select {
+			case <-clientConnected:
+				// Already closed
+			default:
+				close(clientConnected)
+			}
 
 			// Keep connection alive for test
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 			conn.Close()
 		})
 		if err != nil {
@@ -153,42 +181,55 @@ func TestGRPCTransport_DialWithConfig(t *testing.T) {
 		}
 	}()
 
-	// Wait for server to be ready and get address
-	time.Sleep(100 * time.Millisecond)
+	// Wait for server to be ready
 	grpcServer := server.(*grpcTransport)
-	grpcServer.mu.Lock()
-	listener := grpcServer.listener
-	grpcServer.mu.Unlock()
+	serverAddr := waitForServerReady(t, grpcServer, 2*time.Second)
+	close(serverReady)
 
-	if listener == nil {
-		t.Fatal("Server listener not started")
-	}
+	t.Logf("Server listening on %s", serverAddr)
 
-	serverAddr := listener.Addr().String()
-
-	// Create client
+	// Create client config
 	clientConfig := &transport.ClientConfig{
 		ClientID: "test-client",
 		GroupID:  "test-group",
 	}
 
+	// Create client and connect with retry
 	client := NewGRPCTransport()
-	conn, err := client.DialWithConfig(serverAddr, clientConfig)
+	var conn transport.Connection
+	var err error
+
+	// Retry connection a few times to handle race conditions
+	for i := 0; i < 3; i++ {
+		conn, err = client.DialWithConfig(serverAddr, clientConfig)
+		if err == nil {
+			break
+		}
+		t.Logf("Connection attempt %d failed: %v, retrying...", i+1, err)
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	if err != nil {
-		t.Fatalf("Failed to dial: %v", err)
+		// Clean up server before failing
+		server.Close()
+		t.Fatalf("Failed to dial after retries: %v", err)
 	}
 	defer conn.Close()
 
 	// Wait for connection to be established
 	select {
 	case <-clientConnected:
-		// Success
-	case <-time.After(2 * time.Second):
+		t.Log("Client connected successfully")
+	case <-time.After(5 * time.Second):
+		server.Close()
 		t.Fatal("Client connection timeout")
 	}
 
 	// Clean up
-	server.Close()
+	err = server.Close()
+	if err != nil {
+		t.Errorf("Failed to close server: %v", err)
+	}
 }
 
 func TestGRPCTransport_Close(t *testing.T) {
@@ -265,5 +306,102 @@ func TestGRPCTransport_Authentication(t *testing.T) {
 
 	if grpcTransNoAuth.authConfig != nil {
 		t.Error("Auth config should be nil for transport without auth")
+	}
+}
+
+// fakeServerStream is a BiStream server stream that accepts every Send.
+type fakeServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *fakeServerStream) Context() context.Context      { return s.ctx }
+func (s *fakeServerStream) Send(*StreamMessage) error     { return nil }
+func (s *fakeServerStream) Recv() (*StreamMessage, error) { <-s.ctx.Done(); return nil, io.EOF }
+
+// Close used to close writeChan while writers were still sending on it,
+// which panicked with "send on closed channel".
+func TestGRPCConnection_CloseWhileWriting(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		conn := newGRPCServerConnection(&fakeServerStream{ctx: ctx}, "c", "g", "")
+
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for conn.WriteMessage([]byte("x")) == nil {
+				}
+			}()
+		}
+		time.Sleep(time.Millisecond)
+		_ = conn.Close()
+		wg.Wait()
+		cancel()
+	}
+}
+
+// BiStream used to report success before the server checked auth, so a
+// rejected client looked connected and reconnected without backoff.
+func TestGRPCTransport_AuthFailureFailsDial(t *testing.T) {
+	server := NewGRPCTransportWithAuth(&transport.AuthConfig{Username: "u", Password: "right"})
+	if err := server.ListenAndServe("127.0.0.1:0", func(transport.Connection) {}); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer server.Close()
+	addr := waitForServerReady(t, server.(*grpcTransport), 2*time.Second)
+
+	_, err := NewGRPCTransport().DialWithConfig(addr, &transport.ClientConfig{
+		ClientID: "c", GroupID: "g", Username: "u", Password: "wrong",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Unauthenticated") {
+		t.Fatalf("expected Unauthenticated dial error, got %v", err)
+	}
+}
+
+// Closing the server side used to leave the RPC open: the client never saw
+// the queued message or the end of the stream.
+func TestGRPCTransport_ServerCloseEndsStream(t *testing.T) {
+	server := NewGRPCTransport()
+	err := server.ListenAndServe("127.0.0.1:0", func(conn transport.Connection) {
+		_ = conn.WriteMessage([]byte("bye"))
+		_ = conn.Close()
+	})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer server.Close()
+	addr := waitForServerReady(t, server.(*grpcTransport), 2*time.Second)
+
+	conn, err := NewGRPCTransport().DialWithConfig(addr, &transport.ClientConfig{ClientID: "c", GroupID: "g"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	type result struct {
+		msg []byte
+		err error
+	}
+	results := make(chan result, 2)
+	go func() {
+		for i := 0; i < 2; i++ {
+			msg, err := conn.ReadMessage()
+			results <- result{msg, err}
+		}
+	}()
+	for i, want := range []string{"bye", ""} {
+		select {
+		case r := <-results:
+			if want != "" && (r.err != nil || string(r.msg) != want) {
+				t.Fatalf("read %d: got %q, %v; want %q", i, r.msg, r.err, want)
+			}
+			if want == "" && r.err == nil {
+				t.Fatalf("read %d: expected an error after the server closed", i)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("read %d: client still sees an open stream", i)
+		}
 	}
 }

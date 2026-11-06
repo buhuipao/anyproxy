@@ -2,414 +2,521 @@ package protocols
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"io"
 	"net"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/config"
+	"github.com/sagernet/sing/common/auth"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
-func TestNewTUICProxyWithAuth(t *testing.T) {
+func tuicMockDialFunc(ctx context.Context, network, addr string) (net.Conn, error) {
+	return nil, nil
+}
+
+func tuicMockGroupValidator(groupID, password string) bool {
+	return groupID == "testgroup" && password == "testpass"
+}
+
+func TestNewTUICv5ProxyWithAuth(t *testing.T) {
 	cfg := &config.TUICConfig{
-		ListenAddr: ":9443",
+		ListenAddr:        ":8443",
+		CongestionControl: "bbr",
+		UDPRelayMode:      "native",
+		ZeroRTT:           true,
 	}
 
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
-	}
-
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
-	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
+	proxy, err := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, tuicMockGroupValidator, "", "")
 	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
+		t.Fatalf("Failed to create TUIC v5 proxy: %v", err)
 	}
 
-	if proxy == nil {
-		t.Fatal("Expected non-nil proxy")
+	tuicProxy, ok := proxy.(*TUICv5Proxy)
+	if !ok {
+		t.Fatal("Proxy is not TUICv5Proxy type")
 	}
 
-	tuicProxy := proxy.(*TUICProxy)
 	if tuicProxy.config != cfg {
-		t.Error("Config not set correctly")
-	}
-
-	// Verify group validator is set
-	if tuicProxy.groupValidator == nil {
-		t.Error("Group validator not set correctly")
-	}
-
-	// Verify TLS cert paths
-	if tuicProxy.tlsCert != "/path/to/cert.pem" {
-		t.Error("TLS cert path not set correctly")
-	}
-	if tuicProxy.tlsKey != "/path/to/key.pem" {
-		t.Error("TLS key path not set correctly")
+		t.Error("Config was not set correctly")
 	}
 }
 
-func TestTUICProxy_StartStop(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: "127.0.0.1:0", // Use any available port
+func TestNewTUICv5ProxyWithAuth_EmptyListenAddr(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ""}
+	_, err := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, tuicMockGroupValidator, "", "")
+	if err == nil {
+		t.Error("Expected error for empty listen address")
 	}
+}
 
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
+func TestTUICv5Proxy_IsRunning(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	tuicProxy := proxy.(*TUICv5Proxy)
+	if tuicProxy.IsRunning() {
+		t.Error("Proxy should not be running initially")
 	}
+}
 
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
-	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
-	}
-
-	// Test start
-	if err := proxy.Start(); err != nil {
-		t.Fatalf("Failed to start TUIC proxy: %v", err)
-	}
-
-	// Test stop
+func TestTUICv5Proxy_StopWithoutStart(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
 	if err := proxy.Stop(); err != nil {
-		t.Fatalf("Failed to stop TUIC proxy: %v", err)
+		t.Errorf("Stop without start should not error: %v", err)
 	}
 }
 
-func TestTUICProxy_GroupValidation(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: ":9443",
-	}
-
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
-	}
-
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
-	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
-	}
-
-	tuicProxy := proxy.(*TUICProxy)
-
-	// Test valid credentials
-	if !tuicProxy.groupValidator("testgroup", "testpass") {
-		t.Error("Valid group credentials should be accepted")
-	}
-
-	// Test invalid group
-	if tuicProxy.groupValidator("wronggroup", "testpass") {
-		t.Error("Invalid group should be rejected")
-	}
-
-	// Test invalid password
-	if tuicProxy.groupValidator("testgroup", "wrongpass") {
-		t.Error("Invalid password should be rejected")
+func TestTUICv5Proxy_StartWithoutTLS(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: "127.0.0.1:0"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	err := proxy.Start()
+	if err == nil {
+		proxy.Stop()
+		t.Error("Expected error when starting without TLS certificate")
 	}
 }
 
-func TestTUICProxy_ParseTUICCommand(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: ":9443",
-	}
-
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
-	}
-
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
-	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
-	}
-
-	tuicProxy := proxy.(*TUICProxy)
-
-	tests := []struct {
-		name    string
-		data    []byte
-		wantErr bool
-		version uint8
-		cmdType uint8
-	}{
-		{
-			name:    "valid authenticate command",
-			data:    []byte{TUICVersion, TUICCmdAuthenticate, 0x01, 0x02, 0x03},
-			wantErr: false,
-			version: TUICVersion,
-			cmdType: TUICCmdAuthenticate,
-		},
-		{
-			name:    "valid heartbeat command",
-			data:    []byte{TUICVersion, TUICCmdHeartbeat},
-			wantErr: false,
-			version: TUICVersion,
-			cmdType: TUICCmdHeartbeat,
-		},
-		{
-			name:    "too short",
-			data:    []byte{TUICVersion},
-			wantErr: true,
-		},
-		{
-			name:    "wrong version",
-			data:    []byte{0x04, TUICCmdHeartbeat},
-			wantErr: true,
-		},
-		{
-			name:    "empty data",
-			data:    []byte{},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd, err := tuicProxy.parseTUICCommand(tt.data)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseTUICCommand() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr {
-				if cmd.Version != tt.version {
-					t.Errorf("Expected version %v, got %v", tt.version, cmd.Version)
-				}
-				if cmd.Type != tt.cmdType {
-					t.Errorf("Expected command type %v, got %v", tt.cmdType, cmd.Type)
-				}
-			}
-		})
+func TestTUICv5Proxy_DoubleStart(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	tuicProxy := proxy.(*TUICv5Proxy)
+	tuicProxy.mu.Lock()
+	tuicProxy.running = true
+	tuicProxy.mu.Unlock()
+	if err := proxy.Start(); err == nil {
+		t.Error("Expected error for double start")
 	}
 }
 
-func TestTUICProxy_ParseAddress(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: ":9443",
+func TestStdServerConfig(t *testing.T) {
+	tlsCfg := &tls.Config{ServerName: "test.example.com", NextProtos: []string{"h3"}}
+	wrapper := &stdServerConfig{config: tlsCfg}
+
+	if wrapper.ServerName() != "test.example.com" {
+		t.Errorf("Expected 'test.example.com', got '%s'", wrapper.ServerName())
 	}
-
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
+	wrapper.SetServerName("new.example.com")
+	if wrapper.ServerName() != "new.example.com" {
+		t.Error("SetServerName failed")
 	}
-
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
+	if len(wrapper.NextProtos()) != 1 {
+		t.Error("NextProtos failed")
 	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
+	wrapper.SetNextProtos([]string{"h3", "tuic"})
+	if len(wrapper.NextProtos()) != 2 {
+		t.Error("SetNextProtos failed")
 	}
-
-	tuicProxy := proxy.(*TUICProxy)
-
-	tests := []struct {
-		name     string
-		data     []byte
-		wantErr  bool
-		wantType uint8
-		wantHost string
-		wantPort uint16
-	}{
-		{
-			name:     "IPv4 address",
-			data:     []byte{TUICAddrIPv4, 192, 168, 1, 1, 0x00, 0x50}, // 192.168.1.1:80
-			wantErr:  false,
-			wantType: TUICAddrIPv4,
-			wantHost: "192.168.1.1",
-			wantPort: 80,
-		},
-		{
-			name:     "domain address",
-			data:     []byte{TUICAddrDomain, 11, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 0x01, 0xBB}, // example.com:443
-			wantErr:  false,
-			wantType: TUICAddrDomain,
-			wantHost: "example.com",
-			wantPort: 443,
-		},
-		{
-			name:     "none address",
-			data:     []byte{TUICAddrNone},
-			wantErr:  false,
-			wantType: TUICAddrNone,
-		},
-		{
-			name:    "too short",
-			data:    []byte{TUICAddrIPv4, 192},
-			wantErr: true,
-		},
-		{
-			name:    "unknown type",
-			data:    []byte{0x99, 192, 168, 1, 1, 0x00, 0x50},
-			wantErr: true,
-		},
+	if err := wrapper.Start(); err != nil {
+		t.Error("Start should not error")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			addr, err := tuicProxy.parseAddress(tt.data)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseAddress() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr {
-				if addr.Type != tt.wantType {
-					t.Errorf("Expected type %v, got %v", tt.wantType, addr.Type)
-				}
-				if addr.Type != TUICAddrNone {
-					if addr.Host != tt.wantHost {
-						t.Errorf("Expected host %v, got %v", tt.wantHost, addr.Host)
-					}
-					if addr.Port != tt.wantPort {
-						t.Errorf("Expected port %v, got %v", tt.wantPort, addr.Port)
-					}
-				}
-			}
-		})
+	if err := wrapper.Close(); err != nil {
+		t.Error("Close should not error")
+	}
+	if wrapper.Clone() == nil {
+		t.Error("Clone should not return nil")
+	}
+	if cfg, _ := wrapper.Config(); cfg == nil {
+		t.Error("Config should return non-nil")
 	}
 }
 
-func TestTUICProxy_Authentication(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: "127.0.0.1:0",
-	}
-
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
-	}
-
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
-	}
-
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
-	}
-
-	tuicProxy := proxy.(*TUICProxy)
-
-	// Create mock client address
-	clientAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
-
-	// Test group-based authentication
-	// Create UUID and token data using group credentials
-	groupID := "testgroup"
-	password := "testpass"
-
-	// UUID is the group_id (padded/truncated to TUICUUIDLength)
-	uuid := make([]byte, TUICUUIDLength)
-	copy(uuid, []byte(groupID))
-
-	// Token is the password (padded/truncated to TUICTokenLength)
-	token := make([]byte, TUICTokenLength)
-	copy(token, []byte(password))
-
-	authData := make([]byte, TUICUUIDLength+TUICTokenLength)
-	copy(authData[:TUICUUIDLength], uuid)
-	copy(authData[TUICUUIDLength:], token)
-
-	cmd := &TUICCommand{
-		Version: TUICVersion,
-		Type:    TUICCmdAuthenticate,
-		Data:    authData,
-	}
-
-	// Handle authentication
-	clientID := clientAddr.String()
-	tuicProxy.handleAuthenticate(clientAddr, clientID, cmd)
-
-	// Check if client is authenticated
-	client := tuicProxy.getAuthenticatedClient(clientID)
-	if client == nil {
-		t.Error("Client should be authenticated")
-	}
-
-	if !client.Authenticated {
-		t.Error("Client authenticated flag should be true")
-	}
-
-	if string(client.UUID) != string(uuid) {
-		t.Error("Client UUID should match")
-	}
-
-	// Test authentication with invalid credentials
-	invalidGroupID := "wronggroup"
-	invalidUUID := make([]byte, TUICUUIDLength)
-	copy(invalidUUID, []byte(invalidGroupID))
-
-	invalidAuthData := make([]byte, TUICUUIDLength+TUICTokenLength)
-	copy(invalidAuthData[:TUICUUIDLength], invalidUUID)
-	copy(invalidAuthData[TUICUUIDLength:], token) // same password
-
-	invalidCmd := &TUICCommand{
-		Version: TUICVersion,
-		Type:    TUICCmdAuthenticate,
-		Data:    invalidAuthData,
-	}
-
-	// This should not authenticate the client (different client address to avoid conflicts)
-	invalidClientAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:54321")
-	invalidClientID := invalidClientAddr.String()
-	tuicProxy.handleAuthenticate(invalidClientAddr, invalidClientID, invalidCmd)
-
-	// Check that invalid client is not authenticated
-	invalidClient := tuicProxy.getAuthenticatedClient(invalidClientID)
-	if invalidClient != nil {
-		t.Error("Client with invalid credentials should not be authenticated")
+func TestTUICv5Handler_Creation(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	tuicProxy := proxy.(*TUICv5Proxy)
+	handler := &TUICv5Handler{proxy: tuicProxy}
+	if handler.proxy != tuicProxy {
+		t.Error("Handler proxy reference is incorrect")
 	}
 }
 
-func TestTUICProxy_BuildTUICCommand(t *testing.T) {
-	cfg := &config.TUICConfig{
-		ListenAddr: ":9443",
+func TestTUICConfig_Defaults(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	if cfg.GetCongestionControl() != "bbr" {
+		t.Error("Default congestion control should be bbr")
+	}
+	if cfg.GetUDPRelayMode() != "native" {
+		t.Error("Default UDP relay mode should be native")
+	}
+	if len(cfg.GetALPN()) == 0 {
+		t.Error("Default ALPN should not be empty")
+	}
+	if cfg.GetAuthTimeout() <= 0 {
+		t.Error("Default auth timeout should be positive")
+	}
+	if cfg.GetHeartbeat() <= 0 {
+		t.Error("Default heartbeat should be positive")
+	}
+}
+
+func TestGroupIDToUUID_ValidUUID(t *testing.T) {
+	// A valid UUID string should be parsed directly
+	input := "901c0948-6d6a-4717-a9b3-a45d44568824"
+	result, formatted := groupIDToUUID(input)
+
+	if formatted != input {
+		t.Errorf("Expected formatted=%q, got %q", input, formatted)
 	}
 
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.Dial(network, addr)
+	// Verify the binary matches the parsed UUID
+	expected := [16]byte{
+		0x90, 0x1c, 0x09, 0x48,
+		0x6d, 0x6a, 0x47, 0x17,
+		0xa9, 0xb3, 0xa4, 0x5d,
+		0x44, 0x56, 0x88, 0x24,
+	}
+	if result != expected {
+		t.Errorf("Binary UUID mismatch: got %x, want %x", result, expected)
+	}
+}
+
+func TestGroupIDToUUID_NonUUID(t *testing.T) {
+	// A non-UUID groupID should produce a deterministic UUID v5
+	result1, formatted1 := groupIDToUUID("example-group")
+	result2, formatted2 := groupIDToUUID("example-group")
+
+	// Same input must produce same output (deterministic)
+	if result1 != result2 || formatted1 != formatted2 {
+		t.Error("groupIDToUUID is not deterministic for non-UUID input")
 	}
 
-	groupValidator := func(groupID, password string) bool {
-		return groupID == "testgroup" && password == "testpass"
+	// Must be a valid UUID format (8-4-4-4-12 hex with dashes)
+	if len(formatted1) != 36 {
+		t.Errorf("Expected 36-char UUID string, got %d chars: %q", len(formatted1), formatted1)
 	}
 
-	proxy, err := NewTUICProxyWithAuth(cfg, dialFunc, groupValidator, "/path/to/cert.pem", "/path/to/key.pem")
-	if err != nil {
-		t.Fatalf("Failed to create TUIC proxy: %v", err)
+	// Different inputs must produce different UUIDs
+	result3, _ := groupIDToUUID("other-group")
+	if result1 == result3 {
+		t.Error("Different groupIDs should produce different UUIDs")
 	}
+}
 
-	tuicProxy := proxy.(*TUICProxy)
+func TestGroupIDToUUID_UppercaseUUID(t *testing.T) {
+	// Uppercase UUID should also be parsed correctly
+	input := "901C0948-6D6A-4717-A9B3-A45D44568824"
+	_, formatted := groupIDToUUID(input)
 
-	// Test heartbeat command (no data)
-	cmd := tuicProxy.buildTUICCommand(TUICCmdHeartbeat, nil)
-	expected := []byte{TUICVersion, TUICCmdHeartbeat}
-	if len(cmd) != len(expected) {
-		t.Errorf("Expected length %d, got %d", len(expected), len(cmd))
+	// google/uuid normalizes to lowercase
+	expected := "901c0948-6d6a-4717-a9b3-a45d44568824"
+	if formatted != expected {
+		t.Errorf("Expected formatted=%q, got %q", expected, formatted)
 	}
-	for i, b := range expected {
-		if cmd[i] != b {
-			t.Errorf("Expected byte %d to be %02x, got %02x", i, b, cmd[i])
+}
+
+func TestTUICv5Proxy_Initialization(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	tuicProxy := proxy.(*TUICv5Proxy)
+	if tuicProxy.stopCh == nil {
+		t.Error("stopCh should be initialized")
+	}
+	if tuicProxy.users == nil {
+		t.Error("users map should be initialized")
+	}
+}
+
+func TestTUICv5Proxy_StopTimeout(t *testing.T) {
+	cfg := &config.TUICConfig{ListenAddr: ":8443"}
+	proxy, _ := NewTUICv5ProxyWithAuth(cfg, tuicMockDialFunc, nil, "", "")
+	tuicProxy := proxy.(*TUICv5Proxy)
+	tuicProxy.mu.Lock()
+	tuicProxy.running = true
+	tuicProxy.stopCh = make(chan struct{})
+	tuicProxy.mu.Unlock()
+	tuicProxy.wg.Add(1)
+	go func() {
+		defer tuicProxy.wg.Done()
+		time.Sleep(10 * time.Second)
+	}()
+	done := make(chan error)
+	go func() { done <- proxy.Stop() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("Stop did not complete within timeout")
+	}
+}
+
+// fakeTUICPacket is one UDP packet on the TUIC side of an association.
+type fakeTUICPacket struct {
+	data string
+	addr M.Socksaddr
+	err  error // returned by ReadPacket instead of a packet
+}
+
+// fakeTUICClient is the TUIC side of one UDP association.
+type fakeTUICClient struct {
+	N.PacketConn // methods the relay does not use
+	in           chan fakeTUICPacket
+	replies      chan fakeTUICPacket
+	closed       chan struct{}
+	closeOnce    sync.Once
+}
+
+func newFakeTUICClient() *fakeTUICClient {
+	return &fakeTUICClient{
+		in:      make(chan fakeTUICPacket, 4),
+		replies: make(chan fakeTUICPacket, 2),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (c *fakeTUICClient) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	p, ok := <-c.in
+	if !ok {
+		return M.Socksaddr{}, io.EOF
+	}
+	if p.err != nil {
+		return M.Socksaddr{}, p.err
+	}
+	_, err := buffer.WriteString(p.data)
+	return p.addr, err
+}
+
+func (c *fakeTUICClient) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	c.replies <- fakeTUICPacket{data: string(buffer.Bytes()), addr: destination}
+	return nil
+}
+
+func (c *fakeTUICClient) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func recvWithin[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting on channel")
+	}
+	var zero T
+	return zero
+}
+
+// One association sends to two destinations. Each packet must reach its own
+// destination, and each reply must be tagged with the destination it came from.
+func TestTUICUDPRelay_PerDestination(t *testing.T) {
+	type dialed struct {
+		addr string
+		far  net.Conn
+	}
+	dials := make(chan dialed, 2)
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{}, dialFunc: func(_ context.Context, _, addr string) (net.Conn, error) {
+		near, far := net.Pipe()
+		dials <- dialed{addr: addr, far: far}
+		return near, nil
+	}}}
+	client := newFakeTUICClient()
+	done := make(chan struct{})
+	go func() {
+		h.relayUDPPackets(context.Background(), client, "test", "group")
+		close(done)
+	}()
+
+	for _, dest := range []string{"10.0.0.1:1000", "10.0.0.2:2000"} {
+		client.in <- fakeTUICPacket{data: "to " + dest, addr: M.ParseSocksaddr(dest)}
+		d := recvWithin(t, dials)
+		if d.addr != dest {
+			t.Fatalf("dialed %s, want %s", d.addr, dest)
+		}
+		b := make([]byte, 64)
+		n, err := d.far.Read(b)
+		if err != nil || string(b[:n]) != "to "+dest {
+			t.Fatalf("tunnel for %s got %q, err %v", dest, b[:n], err)
+		}
+		if _, err := d.far.Write([]byte("from " + dest)); err != nil {
+			t.Fatal(err)
+		}
+		r := recvWithin(t, client.replies)
+		if r.addr.String() != dest || r.data != "from "+dest {
+			t.Fatalf("reply %q tagged %s, want %q tagged %s", r.data, r.addr, "from "+dest, dest)
 		}
 	}
 
-	// Test command with data
-	data := []byte{0x01, 0x02, 0x03}
-	cmd = tuicProxy.buildTUICCommand(TUICCmdAuthenticate, data)
-	expected = []byte{TUICVersion, TUICCmdAuthenticate, 0x01, 0x02, 0x03}
-	if len(cmd) != len(expected) {
-		t.Errorf("Expected length %d, got %d", len(expected), len(cmd))
+	close(client.in)
+	recvWithin(t, done)
+}
+
+// sing-quic's ReadPacket returns a deadline error once the association has
+// been idle for UDPTimeout. The relay must then end, close the association
+// and release its tunnels. It used to retry the read forever.
+func TestTUICUDPRelay_EndsOnIdleTimeout(t *testing.T) {
+	tunnels := make(chan net.Conn, 1)
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{}, dialFunc: func(context.Context, string, string) (net.Conn, error) {
+		near, far := net.Pipe()
+		tunnels <- far
+		return near, nil
+	}}}
+	client := newFakeTUICClient()
+	done := make(chan struct{})
+	go func() {
+		h.relayUDPPackets(context.Background(), client, "test", "group")
+		close(done)
+	}()
+
+	client.in <- fakeTUICPacket{data: "ping", addr: M.ParseSocksaddr("10.0.0.1:1000")}
+	far := recvWithin(t, tunnels)
+	b := make([]byte, 64)
+	if _, err := far.Read(b); err != nil {
+		t.Fatal(err)
 	}
-	for i, b := range expected {
-		if cmd[i] != b {
-			t.Errorf("Expected byte %d to be %02x, got %02x", i, b, cmd[i])
+
+	client.in <- fakeTUICPacket{err: os.ErrDeadlineExceeded}
+	recvWithin(t, done)
+	recvWithin(t, client.closed)
+	if _, err := far.Read(b); err == nil {
+		t.Fatal("tunnel still open after the association timed out")
+	}
+}
+
+// A slow dial for one destination must not stall packets to another one.
+func TestTUICUDPRelay_SlowDialDoesNotStall(t *testing.T) {
+	release := make(chan struct{})
+	tunnels := make(chan net.Conn, 2)
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{}, dialFunc: func(_ context.Context, _, addr string) (net.Conn, error) {
+		if addr == "10.0.0.1:1000" {
+			<-release
 		}
+		near, far := net.Pipe()
+		tunnels <- far
+		return near, nil
+	}}}
+	client := newFakeTUICClient()
+	done := make(chan struct{})
+	go func() {
+		h.relayUDPPackets(context.Background(), client, "test", "group")
+		close(done)
+	}()
+
+	client.in <- fakeTUICPacket{data: "to slow", addr: M.ParseSocksaddr("10.0.0.1:1000")}
+	client.in <- fakeTUICPacket{data: "to fast", addr: M.ParseSocksaddr("10.0.0.2:2000")}
+	far := recvWithin(t, tunnels)
+	_ = far.SetReadDeadline(time.Now().Add(2 * time.Second))
+	b := make([]byte, 64)
+	n, err := far.Read(b)
+	if err != nil || string(b[:n]) != "to fast" {
+		t.Fatalf("fast destination got %q, err %v", b[:n], err)
+	}
+
+	close(release)
+	slow := recvWithin(t, tunnels)
+	_ = slow.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err = slow.Read(b)
+	if err != nil || string(b[:n]) != "to slow" {
+		t.Fatalf("slow destination got %q, err %v", b[:n], err)
+	}
+	close(client.in)
+	recvWithin(t, done)
+}
+
+// A destination with no traffic for the idle timeout must close its tunnel
+// while the association stays open, and a later packet must dial again.
+func TestTUICUDPRelay_EvictsIdleDestination(t *testing.T) {
+	tunnels := make(chan net.Conn, 2)
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{MaxIdleTimeout: 1}, dialFunc: func(context.Context, string, string) (net.Conn, error) {
+		near, far := net.Pipe()
+		tunnels <- far
+		return near, nil
+	}}}
+	client := newFakeTUICClient()
+	done := make(chan struct{})
+	go func() {
+		h.relayUDPPackets(context.Background(), client, "test", "group")
+		close(done)
+	}()
+
+	dest := M.ParseSocksaddr("10.0.0.1:1000")
+	b := make([]byte, 64)
+	for _, data := range []string{"one", "two"} {
+		client.in <- fakeTUICPacket{data: data, addr: dest}
+		far := recvWithin(t, tunnels)
+		_ = far.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if n, err := far.Read(b); err != nil || string(b[:n]) != data {
+			t.Fatalf("tunnel got %q, err %v, want %q", b[:n], err, data)
+		}
+		if _, err := far.Read(b); err != io.EOF {
+			t.Fatalf("idle tunnel was not closed: %v", err)
+		}
+	}
+
+	close(client.in)
+	recvWithin(t, done)
+}
+
+// A destination whose dial fails must not be dialed again for every packet.
+// It is dialed again only after the idle timeout.
+func TestTUICUDPRelay_FailedDialHeldForIdleTimeout(t *testing.T) {
+	var dials atomic.Int32
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{MaxIdleTimeout: 1}, dialFunc: func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("no client online")
+	}}}
+	client := newFakeTUICClient()
+	done := make(chan struct{})
+	go func() {
+		h.relayUDPPackets(context.Background(), client, "test", "group")
+		close(done)
+	}()
+
+	dest := M.ParseSocksaddr("10.0.0.1:1000")
+	for i := 0; i < 5; i++ {
+		client.in <- fakeTUICPacket{data: "x", addr: dest}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("%d dials for 5 packets, want 1", n)
+	}
+
+	time.Sleep(time.Second)
+	client.in <- fakeTUICPacket{data: "x", addr: dest}
+	deadline := time.Now().Add(2 * time.Second)
+	for dials.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := dials.Load(); n != 2 {
+		t.Fatalf("%d dials after the idle timeout, want 2", n)
+	}
+	close(client.in)
+	recvWithin(t, done)
+}
+
+// Two UDP associations opened in the same second must get different
+// connection IDs. The IDs used to be only the time part of an xid, so the
+// second association was dropped from monitoring as a duplicate.
+func TestTUICUDP_ConnIDsAreUnique(t *testing.T) {
+	h := &TUICv5Handler{proxy: &TUICv5Proxy{config: &config.TUICConfig{}}}
+	ctx := auth.ContextWithUser(context.Background(), "group")
+	target := M.ParseSocksaddr("10.9.9.9:9999")
+	clients := []*fakeTUICClient{newFakeTUICClient(), newFakeTUICClient()}
+	before := monitoring.GetAllConnectionMetrics() // a previous run may not have closed its entries yet
+	for _, c := range clients {
+		h.NewPacketConnectionEx(ctx, c, M.Socksaddr{}, target, nil)
+	}
+
+	ids := 0
+	for id, conn := range monitoring.GetAllConnectionMetrics() {
+		if _, old := before[id]; !old && conn.TargetHost == "tuic-udp:"+target.String() {
+			ids++
+		}
+	}
+	for _, c := range clients {
+		close(c.in)
+		recvWithin(t, c.closed)
+	}
+	if ids != 2 {
+		t.Fatalf("monitoring has %d connections for 2 associations, want 2", ids)
 	}
 }

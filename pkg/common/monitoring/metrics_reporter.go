@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -62,19 +63,25 @@ func (r *MetricsReporter) run() {
 func (r *MetricsReporter) report() {
 	metrics := GetMetrics()
 
+	// Counters are updated atomically by the data path, so read them atomically.
+	active := atomic.LoadInt64(&metrics.ActiveConnections)
+	total := atomic.LoadInt64(&metrics.TotalConnections)
+	sent := atomic.LoadInt64(&metrics.BytesSent)
+	recv := atomic.LoadInt64(&metrics.BytesReceived)
+
 	// Only output when there's activity
-	if metrics.TotalConnections == 0 && metrics.BytesSent == 0 && metrics.BytesReceived == 0 {
+	if total == 0 && sent == 0 && recv == 0 {
 		return
 	}
 
 	// Concise one-line output
 	logger.Info("Performance",
 		"uptime", fmt.Sprintf("%dm", int(metrics.Uptime().Minutes())),
-		"conns", fmt.Sprintf("%d/%d", metrics.ActiveConnections, metrics.TotalConnections),
+		"conns", fmt.Sprintf("%d/%d", active, total),
 		"success", fmt.Sprintf("%.0f%%", metrics.SuccessRate()),
-		"sent", humanizeBytes(metrics.BytesSent),
-		"recv", humanizeBytes(metrics.BytesReceived),
-		"errors", metrics.ErrorCount,
+		"sent", humanizeBytes(sent),
+		"recv", humanizeBytes(recv),
+		"errors", atomic.LoadInt64(&metrics.ErrorCount),
 	)
 }
 

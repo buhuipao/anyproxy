@@ -2,8 +2,7 @@
 package client
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,120 +12,11 @@ import (
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
-	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	"github.com/buhuipao/anyproxy/pkg/web/session"
 	"gopkg.in/yaml.v2"
 )
-
-// Session represents a user session
-type Session struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	CreatedAt time.Time `json:"created_at"`
-	LastSeen  time.Time `json:"last_seen"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// SessionManager manages user sessions
-type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	timeout  time.Duration
-}
-
-// NewSessionManager creates a new session manager
-func NewSessionManager(timeout time.Duration) *SessionManager {
-	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		timeout:  timeout,
-	}
-
-	// Start cleanup goroutine
-	go sm.cleanupExpiredSessions()
-
-	return sm
-}
-
-// CreateSession creates a new session for the user
-func (sm *SessionManager) CreateSession(username string) *Session {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	sessionID := sm.generateSessionID()
-	now := time.Now()
-
-	session := &Session{
-		ID:        sessionID,
-		Username:  username,
-		CreatedAt: now,
-		LastSeen:  now,
-		ExpiresAt: now.Add(sm.timeout),
-	}
-
-	sm.sessions[sessionID] = session
-	return session
-}
-
-// GetSession retrieves a session by ID
-func (sm *SessionManager) GetSession(sessionID string) *Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	session, exists := sm.sessions[sessionID]
-	if !exists || session.ExpiresAt.Before(time.Now()) {
-		return nil
-	}
-
-	return session
-}
-
-// UpdateSession updates the last seen time for a session
-func (sm *SessionManager) UpdateSession(sessionID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if session, exists := sm.sessions[sessionID]; exists {
-		session.LastSeen = time.Now()
-		session.ExpiresAt = time.Now().Add(sm.timeout)
-	}
-}
-
-// DeleteSession deletes a session
-func (sm *SessionManager) DeleteSession(sessionID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	delete(sm.sessions, sessionID)
-}
-
-// cleanupExpiredSessions removes expired sessions
-func (sm *SessionManager) cleanupExpiredSessions() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		sm.mu.Lock()
-		now := time.Now()
-
-		for sessionID, session := range sm.sessions {
-			if session.ExpiresAt.Before(now) {
-				delete(sm.sessions, sessionID)
-			}
-		}
-		sm.mu.Unlock()
-	}
-}
-
-// generateSessionID generates a random session ID
-func (sm *SessionManager) generateSessionID() string {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		logger.Error("Failed to generate session ID", "err", err)
-		return ""
-	}
-	return hex.EncodeToString(bytes)
-}
 
 // API Response Structures (all exclude GroupID for security)
 
@@ -226,7 +116,6 @@ type ClashProxyGroup struct {
 
 // WebServer represents the Client web server
 type WebServer struct {
-	rateLimiter *ratelimit.RateLimiter
 	clientID    string
 	clientIDs   []string     // Track multiple client IDs
 	mu          sync.RWMutex // Protect clientIDs slice
@@ -239,21 +128,20 @@ type WebServer struct {
 	authEnabled    bool
 	authUsername   string
 	authPassword   string
-	sessionManager *SessionManager
+	sessionManager *session.Manager
 
 	// Configuration for clash profile generation
 	config *config.Config
 }
 
 // NewClientWebServer creates a new Client web server
-func NewClientWebServer(addr, staticDir, clientID string, rateLimiter *ratelimit.RateLimiter) *WebServer {
+func NewClientWebServer(addr, staticDir, clientID string) *WebServer {
 	return &WebServer{
 		addr:           addr,
 		staticDir:      staticDir,
 		clientID:       clientID,
-		rateLimiter:    rateLimiter,
 		startTime:      time.Now(),
-		sessionManager: NewSessionManager(24 * time.Hour), // 24 hour sessions
+		sessionManager: session.NewManager(24 * time.Hour), // 24 hour sessions
 	}
 }
 
@@ -466,8 +354,10 @@ func (cws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate credentials
-	if loginReq.Username != cws.authUsername || loginReq.Password != cws.authPassword {
+	// Validate credentials in constant time; compare both, so the time does not show which one is wrong
+	userOK := subtle.ConstantTimeCompare([]byte(loginReq.Username), []byte(cws.authUsername)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(loginReq.Password), []byte(cws.authPassword)) == 1
+	if !userOK || !passOK {
 		logger.Warn("Failed login attempt", "username", loginReq.Username, "remote_addr", r.RemoteAddr)
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
@@ -477,7 +367,7 @@ func (cws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	session := cws.sessionManager.CreateSession(loginReq.Username)
 
 	// Set session cookie
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // the web UI serves plain HTTP, so the cookie cannot be Secure
 		Name:     "client_session_id",
 		Value:    session.ID,
 		Path:     "/",
@@ -512,7 +402,7 @@ func (cws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear session cookie
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // the web UI serves plain HTTP, so the cookie cannot be Secure
 		Name:     "client_session_id",
 		Value:    "",
 		Path:     "/",

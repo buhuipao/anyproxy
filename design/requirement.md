@@ -538,7 +538,7 @@ AnyProxy addresses the need for secure remote access to internal services withou
 - Container support: Docker (future)
 
 #### DR-002: Runtime Requirements
-- Go 1.21+ runtime environment
+- Go 1.25+ runtime environment
 - OpenSSL for certificate operations
 - Systemd for service management (Linux)
 - Network connectivity for WebSocket connections

@@ -14,25 +14,17 @@ client:
   id: "client-demo"
   gateway:
     addr: "47.107.181.88:8443"  # demo gateway address
-    transport_type: "grpc"
+    transport_type: "quic"
     tls_cert: "certs/server.crt"
     auth_username: "gateway_user"
     auth_password: "gateway_password"
   # You must set group_id and group_password
-  group_id: "demo-group"
-  group_password: "demo-password"
-  replicas: 1
+  group_id: "demo-xxx"
+  group_password: "demo-password123!"
+  replicas: 16
   forbidden_hosts:
-    - "0.0.0.0"
-    - "127.0.0.1"
-    - "192.168.0.0/16"
   allowed_hosts:
-    - ".*"
   open_ports:
-    # - remote_port: 8000
-    #   protocol: "tcp"
-    #   local_port: 3000
-    #   local_host: "127.0.0.1"
   web:
     enabled: true
     listen_addr: ":8091"

@@ -6,159 +6,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/credential"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
-	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
 )
-
-func TestNewSessionManager(t *testing.T) {
-	timeout := 1 * time.Hour
-	sm := NewSessionManager(timeout)
-
-	if sm == nil {
-		t.Fatal("NewSessionManager should return non-nil session manager")
-	}
-
-	if sm.timeout != timeout {
-		t.Errorf("Expected timeout %v, got %v", timeout, sm.timeout)
-	}
-
-	if sm.sessions == nil {
-		t.Error("Sessions map should be initialized")
-	}
-}
-
-func TestSessionManager_CreateSession(t *testing.T) {
-	sm := NewSessionManager(1 * time.Hour)
-	username := "testuser"
-
-	session := sm.CreateSession(username)
-
-	if session == nil {
-		t.Fatal("CreateSession should return non-nil session")
-	}
-
-	if session.Username != username {
-		t.Errorf("Expected username %s, got %s", username, session.Username)
-	}
-
-	if session.ID == "" {
-		t.Error("Session ID should not be empty")
-	}
-
-	if session.CreatedAt.IsZero() {
-		t.Error("Created time should be set")
-	}
-
-	if session.LastSeen.IsZero() {
-		t.Error("Last seen time should be set")
-	}
-
-	if session.ExpiresAt.IsZero() {
-		t.Error("Expires time should be set")
-	}
-
-	// Session should be stored in manager
-	storedSession := sm.GetSession(session.ID)
-	if storedSession == nil {
-		t.Error("Session should be stored in manager")
-	}
-
-	if storedSession.ID != session.ID {
-		t.Error("Stored session should have same ID")
-	}
-}
-
-func TestSessionManager_GetSession(t *testing.T) {
-	sm := NewSessionManager(1 * time.Hour)
-
-	// Non-existent session should return nil
-	session := sm.GetSession("nonexistent")
-	if session != nil {
-		t.Error("Non-existent session should return nil")
-	}
-
-	// Create and retrieve valid session
-	created := sm.CreateSession("testuser")
-	retrieved := sm.GetSession(created.ID)
-
-	if retrieved == nil {
-		t.Fatal("Valid session should be retrieved")
-	}
-
-	if retrieved.ID != created.ID {
-		t.Error("Retrieved session should have same ID")
-	}
-}
-
-func TestSessionManager_GetExpiredSession(t *testing.T) {
-	sm := NewSessionManager(1 * time.Millisecond) // Very short timeout
-
-	session := sm.CreateSession("testuser")
-
-	// Wait for session to expire
-	time.Sleep(10 * time.Millisecond)
-
-	// Expired session should return nil
-	retrieved := sm.GetSession(session.ID)
-	if retrieved != nil {
-		t.Error("Expired session should return nil")
-	}
-}
-
-func TestSessionManager_UpdateSession(t *testing.T) {
-	sm := NewSessionManager(1 * time.Hour)
-
-	session := sm.CreateSession("testuser")
-	originalLastSeen := session.LastSeen
-	originalExpiresAt := session.ExpiresAt
-
-	// Wait a bit to ensure time difference
-	time.Sleep(10 * time.Millisecond)
-
-	sm.UpdateSession(session.ID)
-
-	updatedSession := sm.GetSession(session.ID)
-	if updatedSession == nil {
-		t.Fatal("Session should still exist after update")
-	}
-
-	if !updatedSession.LastSeen.After(originalLastSeen) {
-		t.Error("Last seen time should be updated")
-	}
-
-	if !updatedSession.ExpiresAt.After(originalExpiresAt) {
-		t.Error("Expires time should be updated")
-	}
-}
-
-func TestSessionManager_DeleteSession(t *testing.T) {
-	sm := NewSessionManager(1 * time.Hour)
-
-	session := sm.CreateSession("testuser")
-
-	// Session should exist
-	retrieved := sm.GetSession(session.ID)
-	if retrieved == nil {
-		t.Fatal("Session should exist before deletion")
-	}
-
-	sm.DeleteSession(session.ID)
-
-	// Session should no longer exist
-	retrieved = sm.GetSession(session.ID)
-	if retrieved != nil {
-		t.Error("Session should not exist after deletion")
-	}
-}
 
 func TestNewGatewayWebServer(t *testing.T) {
 	addr := ":8080"
 	staticDir := "./static"
-	rateLimiter := ratelimit.NewRateLimiter(nil)
 
-	server := NewGatewayWebServer(addr, staticDir, rateLimiter)
+	server := NewGatewayWebServer(addr, staticDir)
 
 	if server == nil {
 		t.Fatal("NewGatewayWebServer should return non-nil server")
@@ -172,17 +29,13 @@ func TestNewGatewayWebServer(t *testing.T) {
 		t.Errorf("Expected static dir %s, got %s", staticDir, server.staticDir)
 	}
 
-	if server.rateLimiter != rateLimiter {
-		t.Error("Rate limiter should be set")
-	}
-
 	if server.sessionManager == nil {
 		t.Error("Session manager should be initialized")
 	}
 }
 
 func TestWebServer_SetAuth(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	// Initially auth should be disabled
 	if server.authEnabled {
@@ -224,7 +77,7 @@ func TestWebServer_GetStaticDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewGatewayWebServer(":8080", tt.staticDir, nil)
+			server := NewGatewayWebServer(":8080", tt.staticDir)
 			result := server.getStaticDir()
 
 			if result != tt.expected {
@@ -235,7 +88,7 @@ func TestWebServer_GetStaticDir(t *testing.T) {
 }
 
 func TestWebServer_IsPublicPath(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	tests := []struct {
 		path     string
@@ -267,7 +120,7 @@ func TestWebServer_IsPublicPath(t *testing.T) {
 }
 
 func TestWebServer_HandleLogin(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 	server.SetAuth(true, "admin", "password")
 
 	tests := []struct {
@@ -351,7 +204,7 @@ func TestWebServer_HandleLogin(t *testing.T) {
 }
 
 func TestWebServer_HandleLogout(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 	server.SetAuth(true, "admin", "password")
 
 	tests := []struct {
@@ -411,7 +264,7 @@ func TestWebServer_HandleLogout(t *testing.T) {
 }
 
 func TestWebServer_HandleAuthCheck(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 	server.SetAuth(true, "admin", "password")
 
 	// Test without session cookie
@@ -464,7 +317,7 @@ func TestWebServer_HandleAuthCheck(t *testing.T) {
 }
 
 func TestWebServer_HandleGlobalMetrics(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	// Reset monitoring to clean state
 	monitoring.UpdateClientMetrics("test", "group1", 1000, 2000, false)
@@ -498,7 +351,7 @@ func TestWebServer_HandleGlobalMetrics(t *testing.T) {
 }
 
 func TestWebServer_CorsMiddleware(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	// Test with regular request
 	handler := server.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +387,7 @@ func TestWebServer_CorsMiddleware(t *testing.T) {
 }
 
 func TestWebServer_AuthMiddleware(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 	server.SetAuth(true, "admin", "password")
 
 	protectedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -595,7 +448,7 @@ func TestWebServer_AuthMiddleware(t *testing.T) {
 }
 
 func TestWebServer_RequireAuth(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	// Test API request
 	req := httptest.NewRequest("GET", "/api/test", nil)
@@ -623,32 +476,8 @@ func TestWebServer_RequireAuth(t *testing.T) {
 	}
 }
 
-func TestSessionManager_GenerateSessionID(t *testing.T) {
-	sm := NewSessionManager(1 * time.Hour)
-
-	id1 := sm.generateSessionID()
-	id2 := sm.generateSessionID()
-
-	if id1 == "" {
-		t.Error("Session ID should not be empty")
-	}
-
-	if id2 == "" {
-		t.Error("Session ID should not be empty")
-	}
-
-	if id1 == id2 {
-		t.Error("Session IDs should be unique")
-	}
-
-	// Session ID should be hex encoded (64 characters for 32 bytes)
-	if len(id1) != 64 {
-		t.Errorf("Expected session ID length 64, got %d", len(id1))
-	}
-}
-
 func TestWebServer_RespondJSON(t *testing.T) {
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 
 	data := map[string]interface{}{
 		"test": "value",
@@ -678,7 +507,7 @@ func TestWebServer_RespondJSON(t *testing.T) {
 
 func TestWebServer_GetProtectedHandler(t *testing.T) {
 	// Test with auth disabled
-	server := NewGatewayWebServer(":8080", "", nil)
+	server := NewGatewayWebServer(":8080", "")
 	server.SetAuth(false, "", "")
 
 	handler := server.getProtectedHandler()
@@ -714,5 +543,57 @@ func TestWebServer_GetProtectedHandler(t *testing.T) {
 	// Should redirect because no auth
 	if rr.Code == http.StatusOK {
 		t.Error("Should require auth when auth is enabled")
+	}
+}
+
+func TestWebServer_HandleCredentialRegisterAuth(t *testing.T) {
+	tests := []struct {
+		name        string
+		authEnabled bool
+		username    string
+		password    string
+		reqUser     string
+		reqPass     string
+		sendAuth    bool
+		wantStatus  int
+	}{
+		{"no credentials configured, no header", false, "", "", "", "", false, http.StatusUnauthorized},
+		{"no credentials configured, empty basic auth", false, "", "", "", "", true, http.StatusUnauthorized},
+		{"console auth off, wrong password", false, "admin", "secret", "admin", "wrong", true, http.StatusUnauthorized},
+		{"console auth off, correct credentials", false, "admin", "secret", "admin", "secret", true, http.StatusOK},
+		{"console auth on, no header", true, "admin", "secret", "", "", false, http.StatusUnauthorized},
+		{"console auth on, correct credentials", true, "admin", "secret", "admin", "secret", true, http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm, err := credential.NewManager(&credential.Config{Type: credential.Memory})
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			if err := cm.RegisterClientTransport(&credential.ClientCredential{ClientID: "victim", ClientKey: "old-key"}); err != nil {
+				t.Fatalf("RegisterClientTransport() error = %v", err)
+			}
+
+			server := NewGatewayWebServer(":8080", "")
+			server.SetAuth(tt.authEnabled, tt.username, tt.password)
+			server.SetCredentialManager(cm)
+
+			body := `{"client_id":"victim","client_key":"new-key"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/credentials/register", strings.NewReader(body))
+			if tt.sendAuth {
+				req.SetBasicAuth(tt.reqUser, tt.reqPass)
+			}
+			w := httptest.NewRecorder()
+			server.handleCredentialRegister(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			replaced := cm.ValidateClient("victim", "new-key")
+			if replaced != (tt.wantStatus == http.StatusOK) {
+				t.Errorf("key replaced = %v, want %v", replaced, tt.wantStatus == http.StatusOK)
+			}
+		})
 	}
 }

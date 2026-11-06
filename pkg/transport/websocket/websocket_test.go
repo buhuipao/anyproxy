@@ -2,6 +2,8 @@ package websocket
 
 import (
 	"crypto/tls"
+	"encoding/binary"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -455,4 +457,93 @@ func TestWebSocketTransport_Authentication(t *testing.T) {
 			t.Error("Valid authentication was rejected")
 		}
 	})
+}
+
+// A failed write used to be logged and ignored: gorilla write errors are
+// sticky, so every later WriteMessage returned nil but sent nothing.
+func TestWriter_StopsAfterWriteError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	writer := NewWriterWithID(conn, nil, "test")
+	writer.Start()
+	defer writer.Stop()
+
+	// Break the socket under the writer so its next write fails.
+	_ = conn.UnderlyingConn().Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for writer.WriteMessage([]byte("x")) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("WriteMessage still returns nil after the connection failed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The writer used to put messages into a second queue when the first was
+// full and read both queues in random order, so a slow peer got messages out
+// of order: tunnel data arrived reordered, and a close could pass its data.
+func TestWriter_KeepsOrderWhenQueueIsFull(t *testing.T) {
+	const total = 3 * transport.WriteChannelSize
+	errs := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer conn.Close()
+		time.Sleep(300 * time.Millisecond) // read nothing until the writer queue is full
+		for i := 0; i < total; i++ {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				errs <- err
+				return
+			}
+			if got := binary.BigEndian.Uint32(data); got != uint32(i) {
+				errs <- fmt.Errorf("message %d arrived at position %d", got, i)
+				return
+			}
+		}
+		errs <- nil
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	writer := NewWriterWithID(conn, nil, "test")
+	writer.Start()
+	defer writer.Stop()
+
+	go func() {
+		for i := 0; i < total; i++ {
+			data := make([]byte, 4*1024)
+			binary.BigEndian.PutUint32(data, uint32(i))
+			if writer.WriteMessage(data) != nil {
+				return
+			}
+		}
+	}()
+
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
 }

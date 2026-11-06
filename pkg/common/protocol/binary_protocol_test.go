@@ -453,6 +453,128 @@ func TestBinaryProtocolDataMessage(t *testing.T) {
 	}
 }
 
+func TestUDPDataMessage(t *testing.T) {
+	tests := []struct {
+		name       string
+		connID     string
+		targetAddr string
+		data       []byte
+	}{
+		{
+			name:       "normal UDP message",
+			connID:     testConnID,
+			targetAddr: "8.8.8.8:53",
+			data:       []byte("DNS query data"),
+		},
+		{
+			name:       "empty data",
+			connID:     "d115k314nsj2he328ae1",
+			targetAddr: "192.168.1.1:1234",
+			data:       []byte{},
+		},
+		{
+			name:       "binary data",
+			connID:     "d115k314nsj2he328ae2",
+			targetAddr: "example.com:53",
+			data:       []byte{0x00, 0xFF, 0x42, 0xCA, 0xFE, 0xBA, 0xBE},
+		},
+		{
+			name:       "IPv6 target",
+			connID:     "d115k314nsj2he328ae3",
+			targetAddr: "[::1]:8080",
+			data:       []byte("IPv6 UDP data"),
+		},
+		{
+			name:       "large data",
+			connID:     "d115k314nsj2he328ae4",
+			targetAddr: "10.0.0.1:9999",
+			data:       bytes.Repeat([]byte("X"), 65535),
+		},
+		{
+			name:       "short connID",
+			connID:     "short",
+			targetAddr: "localhost:53",
+			data:       []byte("test"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pack
+			packed := PackUDPDataMessage(tt.connID, tt.targetAddr, tt.data)
+
+			// Verify it's a binary message
+			if !IsBinaryMessage(packed) {
+				t.Error("Expected binary message")
+			}
+
+			// Unpack header
+			_, msgType, payload, err := UnpackBinaryHeader(packed)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if msgType != BinaryMsgTypeUDPData {
+				t.Errorf("Wrong message type: %d, expected %d", msgType, BinaryMsgTypeUDPData)
+			}
+
+			// Unpack UDP data message
+			connID, targetAddr, data, err := UnpackUDPDataMessage(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Verify connID
+			expectedConnID := tt.connID
+			if len(expectedConnID) > ConnIDSize {
+				expectedConnID = expectedConnID[:ConnIDSize]
+			}
+			if connID != expectedConnID {
+				t.Errorf("ConnID mismatch: got %q, want %q", connID, expectedConnID)
+			}
+
+			// Verify target address
+			if targetAddr != tt.targetAddr {
+				t.Errorf("Target address mismatch: got %q, want %q", targetAddr, tt.targetAddr)
+			}
+
+			// Verify data
+			if !bytes.Equal(data, tt.data) {
+				t.Errorf("Data mismatch: got %d bytes, want %d bytes", len(data), len(tt.data))
+			}
+		})
+	}
+}
+
+func TestUDPDataMessageEdgeCases(t *testing.T) {
+	t.Run("invalid UDP data message - too short", func(t *testing.T) {
+		// Test with data too short (less than ConnIDSize + 2)
+		_, _, _, err := UnpackUDPDataMessage([]byte{})
+		if err == nil {
+			t.Error("Expected error for empty data")
+		}
+
+		_, _, _, err = UnpackUDPDataMessage(bytes.Repeat([]byte{0}, 10))
+		if err == nil {
+			t.Error("Expected error for data too short")
+		}
+	})
+
+	t.Run("invalid address length", func(t *testing.T) {
+		// Create invalid data with address length pointing beyond data
+		invalidData := make([]byte, ConnIDSize+2)
+		copy(invalidData[:ConnIDSize], []byte("test-conn-id"))
+		// Set address length to 255, but no actual address data follows
+		invalidData[ConnIDSize] = 0x00
+		invalidData[ConnIDSize+1] = 0xFF
+
+		_, _, _, err := UnpackUDPDataMessage(invalidData)
+		if err == nil {
+			t.Error("Expected error for invalid address length")
+		}
+	})
+}
+
 func TestErrorMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -556,6 +678,168 @@ func TestErrorMessageEdgeCases(t *testing.T) {
 
 		if unpackedErrorMsg != maxErrorMsg {
 			t.Errorf("Max length error message mismatch: got length %d, want length %d", len(unpackedErrorMsg), len(maxErrorMsg))
+		}
+	})
+}
+
+// ==================== Heartbeat Message Tests ====================
+
+func TestHeartbeatMessage(t *testing.T) {
+	tests := []struct {
+		name      string
+		clientID  string
+		timestamp int64
+	}{
+		{
+			name:      "normal heartbeat",
+			clientID:  "client-123",
+			timestamp: 1705420800000000000, // Example timestamp in nanoseconds
+		},
+		{
+			name:      "empty client ID",
+			clientID:  "",
+			timestamp: 0,
+		},
+		{
+			name:      "long client ID",
+			clientID:  "very-long-client-id-with-many-characters-12345678901234567890",
+			timestamp: 9223372036854775807, // Max int64
+		},
+		{
+			name:      "unicode client ID",
+			clientID:  "客户端-测试-123",
+			timestamp: 1705420800000000000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pack heartbeat message
+			packed := PackHeartbeatMessage(tt.clientID, tt.timestamp)
+
+			// Verify it's a binary message
+			if !IsBinaryMessage(packed) {
+				t.Error("Expected binary message")
+			}
+
+			// Unpack header
+			version, msgType, payload, err := UnpackBinaryHeader(packed)
+			if err != nil {
+				t.Fatalf("Failed to unpack header: %v", err)
+			}
+
+			if version != BinaryProtocolVersion {
+				t.Errorf("Expected version %d, got %d", BinaryProtocolVersion, version)
+			}
+
+			if msgType != BinaryMsgTypeHeartbeat {
+				t.Errorf("Expected message type %d, got %d", BinaryMsgTypeHeartbeat, msgType)
+			}
+
+			// Unpack heartbeat message
+			unpackedClientID, unpackedTimestamp, err := UnpackHeartbeatMessage(payload)
+			if err != nil {
+				t.Fatalf("Failed to unpack heartbeat message: %v", err)
+			}
+
+			// Verify client ID
+			if unpackedClientID != tt.clientID {
+				t.Errorf("Client ID mismatch: got %q, want %q", unpackedClientID, tt.clientID)
+			}
+
+			// Verify timestamp
+			if unpackedTimestamp != tt.timestamp {
+				t.Errorf("Timestamp mismatch: got %d, want %d", unpackedTimestamp, tt.timestamp)
+			}
+		})
+	}
+}
+
+func TestHeartbeatAckMessage(t *testing.T) {
+	tests := []struct {
+		name      string
+		timestamp int64
+	}{
+		{
+			name:      "normal ack",
+			timestamp: 1705420800000000000,
+		},
+		{
+			name:      "zero timestamp",
+			timestamp: 0,
+		},
+		{
+			name:      "max timestamp",
+			timestamp: 9223372036854775807, // Max int64
+		},
+		{
+			name:      "negative timestamp",
+			timestamp: -1705420800000000000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pack heartbeat ack message
+			packed := PackHeartbeatAckMessage(tt.timestamp)
+
+			// Verify it's a binary message
+			if !IsBinaryMessage(packed) {
+				t.Error("Expected binary message")
+			}
+
+			// Unpack header
+			version, msgType, payload, err := UnpackBinaryHeader(packed)
+			if err != nil {
+				t.Fatalf("Failed to unpack header: %v", err)
+			}
+
+			if version != BinaryProtocolVersion {
+				t.Errorf("Expected version %d, got %d", BinaryProtocolVersion, version)
+			}
+
+			if msgType != BinaryMsgTypeHeartbeatAck {
+				t.Errorf("Expected message type %d, got %d", BinaryMsgTypeHeartbeatAck, msgType)
+			}
+
+			// Unpack heartbeat ack message
+			unpackedTimestamp, err := UnpackHeartbeatAckMessage(payload)
+			if err != nil {
+				t.Fatalf("Failed to unpack heartbeat ack message: %v", err)
+			}
+
+			// Verify timestamp
+			if unpackedTimestamp != tt.timestamp {
+				t.Errorf("Timestamp mismatch: got %d, want %d", unpackedTimestamp, tt.timestamp)
+			}
+		})
+	}
+}
+
+func TestHeartbeatMessageEdgeCases(t *testing.T) {
+	t.Run("invalid heartbeat message - too short", func(t *testing.T) {
+		// Test with data too short (less than minimum 10 bytes)
+		_, _, err := UnpackHeartbeatMessage([]byte{0x00, 0x01})
+		if err == nil {
+			t.Error("Expected error for data too short")
+		}
+	})
+
+	t.Run("invalid heartbeat message - incomplete", func(t *testing.T) {
+		// Test with incomplete data (clientID length says 10 but not enough data)
+		data := []byte{0x00, 0x0A} // clientID length = 10
+		data = append(data, []byte("short")...) // Only 5 bytes of clientID
+		_, _, err := UnpackHeartbeatMessage(data)
+		if err == nil {
+			t.Error("Expected error for incomplete data")
+		}
+	})
+
+	t.Run("invalid heartbeat ack message - too short", func(t *testing.T) {
+		// Test with data too short (less than 8 bytes)
+		_, err := UnpackHeartbeatAckMessage([]byte{0x00, 0x01, 0x02, 0x03})
+		if err == nil {
+			t.Error("Expected error for data too short")
 		}
 	})
 }

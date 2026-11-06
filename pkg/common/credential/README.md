@@ -26,7 +26,7 @@ The package has been organized into separate files for better maintainability:
 
 ### DB Store
 - Stores credentials in a database
-- Supports MySQL, PostgreSQL, SQLite, and other SQL databases
+- Supports MySQL, PostgreSQL and SQLite (`driver`: `mysql`, `postgres`, `sqlite`)
 - Good for production deployments with high availability requirements
 
 ## Usage
@@ -71,7 +71,8 @@ err = mgr.RemoveGroup("group1")
 
 ### Database Setup
 
-For the DB store, the table will be automatically created with the following schema:
+For the DB store, the table will be automatically created with the following schema.
+The `password_hash` column holds the raw group password, not a hash (up to 64 characters):
 
 ```sql
 CREATE TABLE IF NOT EXISTS credentials (
@@ -90,25 +91,16 @@ CREATE TABLE IF NOT EXISTS credentials (
 # Run all tests except database tests
 go test ./...
 
-# Run database tests (requires appropriate driver)
-# First install a driver, e.g.:
-go get modernc.org/sqlite  # Pure Go SQLite driver
-
-# Then run with the dbtest build tag:
+# Run database tests (SQLite) with the dbtest build tag:
 go test -tags=dbtest ./...
 ```
 
 ### Database Drivers
 
-To use the DB store, you need to import the appropriate driver:
+The package imports these pure Go drivers, so no CGO is needed:
 
-```go
-// SQLite (Pure Go, no CGO required)
-import _ "modernc.org/sqlite"
-
-// MySQL
-import _ "github.com/go-sql-driver/mysql"
-
-// PostgreSQL
-import _ "github.com/lib/pq"
-``` 
+| `driver` | Package |
+|---|---|
+| `sqlite` | `modernc.org/sqlite` |
+| `mysql` | `github.com/go-sql-driver/mysql` |
+| `postgres` | `github.com/lib/pq` | 

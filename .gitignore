@@ -24,3 +24,18 @@ logs/
 
 certs.tar.gz
 image.tar.gz
+
+demo-.*
+
+# tests/latency 编译产物
+tests/latency/client
+tests/latency/gateway
+tests/latency/latency
+tests/*/*.key
+anyproxy-docker.tar
+
+# binaries
+latency
+latency-tuic
+gateway
+client

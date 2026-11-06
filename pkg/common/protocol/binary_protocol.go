@@ -25,9 +25,12 @@ const (
 	BinaryMsgTypeAuth         byte = 0x06 // Authentication request
 	BinaryMsgTypeAuthResponse byte = 0x07 // Authentication response
 	BinaryMsgTypeError        byte = 0x08 // Error message
+	BinaryMsgTypeHeartbeat    byte = 0x09 // Heartbeat message (client -> gateway)
+	BinaryMsgTypeHeartbeatAck byte = 0x0A // Heartbeat acknowledgment (gateway -> client)
 
 	// Data message types (0x10 - 0x1F)
-	BinaryMsgTypeData byte = 0x10 // Data transfer
+	BinaryMsgTypeData    byte = 0x10 // Data transfer (TCP stream)
+	BinaryMsgTypeUDPData byte = 0x11 // UDP data transfer
 
 	// Reserved types (0x20 - 0xFF)
 )
@@ -121,7 +124,11 @@ func UnpackDataMessage(data []byte) (connID string, payload []byte, err error) {
 		connID = string(connIDBytes)
 	}
 
-	payload = data[ConnIDSize:]
+	// 🔧 CRITICAL FIX: Copy payload to avoid buffer reuse issues
+	// data[ConnIDSize:] is a slice reference to the original buffer
+	// which may be reused by the QUIC layer, causing data corruption
+	payload = make([]byte, len(data)-ConnIDSize)
+	copy(payload, data[ConnIDSize:])
 	return connID, payload, nil
 }
 
@@ -789,4 +796,271 @@ func UnpackErrorMessage(data []byte) (errorMsg string, err error) {
 	errorMsg = string(data[offset : offset+int(errorLen)])
 
 	return errorMsg, nil
+}
+
+// --- UDP Data messages ---
+// Format: [version:1][type:1][connID:20][addrLen:2][targetAddr:N][data:M]
+// This preserves UDP datagram boundaries by including the target address with each datagram
+
+// PackUDPDataMessage packs UDP data message
+func PackUDPDataMessage(connID, targetAddr string, data []byte) []byte {
+	if len(connID) > ConnIDSize {
+		connID = connID[:ConnIDSize]
+	}
+
+	targetAddrBytes := []byte(targetAddr)
+
+	// Calculate total payload length: connID + addrLen + targetAddr + data
+	totalLen := ConnIDSize + 2 + len(targetAddrBytes) + len(data)
+	payload := make([]byte, totalLen)
+
+	offset := 0
+
+	// Copy connID (fixed 20 bytes)
+	connIDBytes := []byte(connID)
+	copy(payload[offset:offset+ConnIDSize], connIDBytes)
+	offset += ConnIDSize
+
+	// Target address length (2 bytes)
+	binary.BigEndian.PutUint16(payload[offset:], uint16(len(targetAddrBytes))) //nolint:gosec // address is always short
+	offset += 2
+
+	// Target address content
+	copy(payload[offset:], targetAddrBytes)
+	offset += len(targetAddrBytes)
+
+	// UDP data
+	copy(payload[offset:], data)
+
+	return PackBinaryMessage(BinaryMsgTypeUDPData, payload)
+}
+
+// BuildUDPDataHeader builds the UDP data message header without the payload
+// Returns the header bytes that should be prepended to the data
+func BuildUDPDataHeader(connID, targetAddr string) []byte {
+	if len(connID) > ConnIDSize {
+		connID = connID[:ConnIDSize]
+	}
+
+	targetAddrBytes := []byte(targetAddr)
+
+	// Header size: version(1) + type(1) + connID(20) + addrLen(2) + targetAddr(N)
+	headerLen := BinaryHeaderSize + ConnIDSize + 2 + len(targetAddrBytes)
+	header := make([]byte, headerLen)
+
+	offset := 0
+
+	// Protocol header
+	header[offset] = BinaryProtocolVersion
+	offset++
+	header[offset] = BinaryMsgTypeUDPData
+	offset++
+
+	// ConnID (fixed 20 bytes, pad with zeros)
+	copy(header[offset:offset+ConnIDSize], []byte(connID))
+	offset += ConnIDSize
+
+	// Target address length (2 bytes)
+	binary.BigEndian.PutUint16(header[offset:], uint16(len(targetAddrBytes))) //nolint:gosec // address is always short
+	offset += 2
+
+	// Target address content
+	copy(header[offset:], targetAddrBytes)
+
+	return header
+}
+
+// UnpackUDPDataMessage unpacks UDP data message
+func UnpackUDPDataMessage(data []byte) (connID, targetAddr string, payload []byte, err error) {
+	if len(data) < ConnIDSize+2 {
+		return "", "", nil, fmt.Errorf("UDP data message too short: %d bytes", len(data))
+	}
+
+	offset := 0
+
+	// Extract connID (remove trailing zero bytes)
+	connIDBytes := data[offset : offset+ConnIDSize]
+	for i, b := range connIDBytes {
+		if b == 0 {
+			connID = string(connIDBytes[:i])
+			break
+		}
+	}
+	if connID == "" {
+		connID = string(connIDBytes)
+	}
+	offset += ConnIDSize
+
+	// Extract target address length
+	addrLen := binary.BigEndian.Uint16(data[offset:])
+	offset += 2
+
+	// Validate address length
+	if offset+int(addrLen) > len(data) {
+		return "", "", nil, fmt.Errorf("invalid target address length: %d", addrLen)
+	}
+
+	// Extract target address
+	targetAddr = string(data[offset : offset+int(addrLen)])
+	offset += int(addrLen)
+
+	// Remaining data is the UDP payload
+	payload = make([]byte, len(data)-offset)
+	copy(payload, data[offset:])
+
+	return connID, targetAddr, payload, nil
+}
+
+// ============================================================================
+// Zero-Copy StreamBuffer Support
+// ============================================================================
+
+// StreamBufferPrepender is an interface for buffers that support header prepending.
+// This allows the protocol package to work with StreamBuffer without importing it.
+type StreamBufferPrepender interface {
+	PrependHeader(header []byte) bool
+	AvailableHeaderSpace() int
+}
+
+// ErrHeaderTooLarge is returned when the header exceeds available space.
+var ErrHeaderTooLarge = fmt.Errorf("header too large for available space")
+
+// BuildDataHeader builds a TCP data message header.
+// Format: [version:1][type:1][connID:20]
+// Returns the header bytes to prepend.
+func BuildDataHeader(connID string) []byte {
+	header := make([]byte, BinaryHeaderSize+ConnIDSize)
+	header[0] = BinaryProtocolVersion
+	header[1] = BinaryMsgTypeData
+
+	// Copy connID, pad with zeros if shorter
+	connIDBytes := []byte(connID)
+	if len(connIDBytes) > ConnIDSize {
+		connIDBytes = connIDBytes[:ConnIDSize]
+	}
+	copy(header[BinaryHeaderSize:], connIDBytes)
+
+	return header
+}
+
+// PrependDataHeader prepends a TCP data header to a StreamBuffer.
+// This is a zero-copy operation that uses the buffer's reserved header space.
+func PrependDataHeader(sb StreamBufferPrepender, connID string) error {
+	header := BuildDataHeader(connID)
+	if len(header) > sb.AvailableHeaderSpace() {
+		return ErrHeaderTooLarge
+	}
+	if !sb.PrependHeader(header) {
+		return ErrHeaderTooLarge
+	}
+	return nil
+}
+
+// PrependUDPDataHeaderToBuffer prepends a UDP data header to a StreamBuffer.
+// This is a zero-copy operation that uses the buffer's reserved header space.
+// Note: Uses BuildUDPDataHeader which is already defined above.
+func PrependUDPDataHeaderToBuffer(sb StreamBufferPrepender, connID, targetAddr string) error {
+	header := BuildUDPDataHeader(connID, targetAddr)
+	if len(header) > sb.AvailableHeaderSpace() {
+		return ErrHeaderTooLarge
+	}
+	if !sb.PrependHeader(header) {
+		return ErrHeaderTooLarge
+	}
+	return nil
+}
+
+// DataHeaderSize returns the size of a TCP data header.
+func DataHeaderSize() int {
+	return BinaryHeaderSize + ConnIDSize
+}
+
+// UDPDataHeaderSize returns the size of a UDP data header for the given target address.
+func UDPDataHeaderSize(targetAddr string) int {
+	return BinaryHeaderSize + ConnIDSize + 2 + len(targetAddr)
+}
+
+// ==================== Heartbeat Messages ====================
+
+// PackHeartbeatMessage packs a heartbeat message from client to gateway
+// Format: [clientID_len:2bytes][clientID:variable][timestamp:8bytes]
+func PackHeartbeatMessage(clientID string, timestamp int64) []byte {
+	clientIDBytes := []byte(clientID)
+	clientIDLen := len(clientIDBytes)
+
+	// Calculate payload size: 2 (clientID len) + clientID + 8 (timestamp)
+	payloadSize := 2 + clientIDLen + 8
+	payload := make([]byte, payloadSize)
+
+	offset := 0
+
+	// Write clientID length (2 bytes)
+	binary.BigEndian.PutUint16(payload[offset:], uint16(clientIDLen)) //nolint:gosec // clientID is always short
+	offset += 2
+
+	// Write clientID
+	copy(payload[offset:], clientIDBytes)
+	offset += clientIDLen
+
+	// Write timestamp (8 bytes, big-endian)
+	binary.BigEndian.PutUint64(payload[offset:], uint64(timestamp)) //nolint:gosec // same bits, read back as int64
+
+	return PackBinaryMessage(BinaryMsgTypeHeartbeat, payload)
+}
+
+// UnpackHeartbeatMessage unpacks a heartbeat message
+// Returns clientID and timestamp
+func UnpackHeartbeatMessage(data []byte) (clientID string, timestamp int64, err error) {
+	if len(data) < 10 { // Minimum: 2 (len) + 0 (empty clientID) + 8 (timestamp)
+		return "", 0, fmt.Errorf("heartbeat message too short: %d bytes", len(data))
+	}
+
+	offset := 0
+
+	// Read clientID length
+	clientIDLen := int(data[offset])<<8 | int(data[offset+1])
+	offset += 2
+
+	if len(data) < offset+clientIDLen+8 {
+		return "", 0, fmt.Errorf("heartbeat message incomplete: expected %d bytes, got %d", offset+clientIDLen+8, len(data))
+	}
+
+	// Read clientID
+	clientID = string(data[offset : offset+clientIDLen])
+	offset += clientIDLen
+
+	// Read timestamp (big-endian)
+	timestamp = int64(data[offset])<<56 | int64(data[offset+1])<<48 |
+		int64(data[offset+2])<<40 | int64(data[offset+3])<<32 |
+		int64(data[offset+4])<<24 | int64(data[offset+5])<<16 |
+		int64(data[offset+6])<<8 | int64(data[offset+7])
+
+	return clientID, timestamp, nil
+}
+
+// PackHeartbeatAckMessage packs a heartbeat acknowledgment message from gateway to client
+// Format: [timestamp:8bytes]
+func PackHeartbeatAckMessage(timestamp int64) []byte {
+	payload := make([]byte, 8)
+
+	// Write timestamp (8 bytes, big-endian)
+	binary.BigEndian.PutUint64(payload, uint64(timestamp)) //nolint:gosec // same bits, read back as int64
+
+	return PackBinaryMessage(BinaryMsgTypeHeartbeatAck, payload)
+}
+
+// UnpackHeartbeatAckMessage unpacks a heartbeat acknowledgment message
+// Returns timestamp
+func UnpackHeartbeatAckMessage(data []byte) (timestamp int64, err error) {
+	if len(data) < 8 {
+		return 0, fmt.Errorf("heartbeat ack message too short: %d bytes", len(data))
+	}
+
+	// Read timestamp (big-endian)
+	timestamp = int64(data[0])<<56 | int64(data[1])<<48 |
+		int64(data[2])<<40 | int64(data[3])<<32 |
+		int64(data[4])<<24 | int64(data[5])<<16 |
+		int64(data[6])<<8 | int64(data[7])
+
+	return timestamp, nil
 }

@@ -7,9 +7,10 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/sagernet/quic-go"
 
 	"github.com/buhuipao/anyproxy/pkg/logger"
 	"github.com/buhuipao/anyproxy/pkg/transport"
@@ -17,26 +18,29 @@ import (
 
 // 🆕 Write request type
 type writeRequest struct {
-	data    []byte
-	errChan chan error
+	data      []byte
+	errChan   chan error
+	buffers   net.Buffers            // For writev support
+	streamBuf transport.StreamBuffer // For StreamBuffer ownership transfer
 }
 
 // quicConnection implements transport.Connection for QUIC streams
 type quicConnection struct {
-	stream        quic.Stream
-	conn          quic.Connection
+	stream        quic.Stream     // sagernet/quic-go: Stream is interface type
+	conn          quic.Connection // sagernet/quic-go: Connection is interface type
 	clientID      string
 	groupID       string
 	groupPassword string // Client password for group credential management
 	// 🆕 Remove mutex, use async writes instead
-	writeChan chan *writeRequest // 🆕 Async write queue
-	closed    bool
+	writeChan chan *writeRequest // Async write queue; never closed, writers stop on ctx
+	closed    atomic.Bool
 	ctx       context.Context
 	cancel    context.CancelFunc
 	readChan  chan []byte
-	errorChan chan error
+	errorChan chan error // Only used by the auth handshake (tempConn)
 	closeOnce sync.Once
-	isClient  bool // Whether this is a client connection
+	isClient  bool          // Whether this is a client connection
+	done      chan struct{} // Closed when writeLoop has flushed and exited
 }
 
 var _ transport.Connection = (*quicConnection)(nil)
@@ -51,11 +55,11 @@ func newQUICConnection(stream quic.Stream, conn quic.Connection, clientID, group
 		clientID:      clientID,
 		groupID:       groupID,
 		groupPassword: groupPassword,
-		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		writeChan:     make(chan *writeRequest, transport.WriteChannelSize),
 		ctx:           ctx,
 		cancel:        cancel,
-		readChan:      make(chan []byte, 100),
-		errorChan:     make(chan error, 1),
+		readChan:      make(chan []byte, transport.ReadChannelSize),
+		done:          make(chan struct{}),
 		isClient:      true, // Default to client
 	}
 
@@ -75,11 +79,11 @@ func newQUICServerConnection(stream quic.Stream, conn quic.Connection, clientID,
 		clientID:      clientID,
 		groupID:       groupID,
 		groupPassword: groupPassword,
-		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		writeChan:     make(chan *writeRequest, transport.WriteChannelSize),
 		ctx:           ctx,
 		cancel:        cancel,
-		readChan:      make(chan []byte, 100),
-		errorChan:     make(chan error, 1),
+		readChan:      make(chan []byte, transport.ReadChannelSize),
+		done:          make(chan struct{}),
 		isClient:      false, // Server connection
 	}
 
@@ -96,11 +100,7 @@ func (c *quicConnection) writeLoop() {
 		// Process requests already in the queue first
 		for {
 			select {
-			case req, ok := <-c.writeChan:
-				if !ok {
-					// Channel is closed, exit
-					return
-				}
+			case req := <-c.writeChan:
 				if req != nil && req.errChan != nil {
 					select {
 					case req.errChan <- fmt.Errorf("connection closed"):
@@ -112,6 +112,7 @@ func (c *quicConnection) writeLoop() {
 				}
 			default:
 				// Queue is empty, exit
+				close(c.done)
 				return
 			}
 		}
@@ -120,24 +121,25 @@ func (c *quicConnection) writeLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			return
-		case req, ok := <-c.writeChan:
-			if !ok {
-				// writeChan is closed
+			// Flush what is already queued (e.g. a final error message)
+			// before Close closes the stream, like the websocket drain.
+			if len(c.writeChan) == 0 {
 				return
 			}
-
-			if c.closed {
-				if req.errChan != nil {
-					req.errChan <- fmt.Errorf("connection closed")
-					close(req.errChan)
+		case req := <-c.writeChan:
+			var err error
+			if req.buffers != nil {
+				// 🆕 Use writev for scatter-gather I/O
+				_, err = req.buffers.WriteTo(c.stream)
+				if req.streamBuf != nil {
+					req.streamBuf.Release()
 				}
-				continue
+			} else {
+				err = c.writeDataDirect(req.data)
 			}
 
-			err := c.writeDataDirect(req.data)
 			if err != nil && isQUICError(err) {
-				c.closed = true
+				c.closed.Store(true)
 			}
 
 			if req.errChan != nil {
@@ -153,39 +155,78 @@ func (c *quicConnection) WriteMessage(data []byte) error {
 	return c.writeDataAsync(data)
 }
 
-// 🆕 Async write method, lock-free design
-func (c *quicConnection) writeDataAsync(data []byte) error {
-	if c.closed {
+// WriteMessageNoCopy implements transport.NoCopyWriter
+// 🔧 PERFORMANCE: Caller guarantees data won't be modified, skip copy
+func (c *quicConnection) WriteMessageNoCopy(data []byte) error {
+	return c.writeDataAsyncNoCopy(data)
+}
+
+// WriteStreamBuffer implements transport.StreamBufferWriter
+// 🔧 ZERO-COPY: Uses writev (scatter-gather I/O) for maximum performance
+// Takes ownership of the StreamBuffer and releases it after writing.
+func (c *quicConnection) WriteStreamBuffer(sb transport.StreamBuffer) error {
+	if c.closed.Load() {
+		sb.Release()
 		return fmt.Errorf("connection closed")
 	}
 
-	errChan := make(chan error, 1)
+	// Build length prefix for the QUIC stream protocol
+	totalLen := sb.TotalLen()
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(totalLen)) //nolint:gosec // pooled stream buffers are far below 4 GiB
+
+	// Create net.Buffers for writev: [length][header][data]
+	bufs := net.Buffers{lenBuf, sb.HeaderSlice(), sb.DataPortion()}
+
 	req := &writeRequest{
-		data:    data,
-		errChan: errChan,
+		buffers:   bufs,
+		streamBuf: sb,
+		errChan:   nil, // Fire-and-forget
 	}
 
+	// 🔧 FIX: Block until channel has space or context canceled
+	// Don't timeout and drop data - that causes unnecessary packet loss
 	select {
 	case c.writeChan <- req:
-		// Wait for write result
-		select {
-		case err := <-errChan:
-			return err
-		case <-c.ctx.Done():
-			// Fix: Use timed select to prevent goroutine leaks
-			go func() {
-				select {
-				case <-errChan:
-					// Successfully consumed error
-				case <-time.After(5 * time.Second):
-					// Exit after timeout to prevent permanent blocking
-					logger.Warn("Timeout waiting for write error channel", "client_id", c.clientID)
-				}
-			}()
-			return c.ctx.Err()
-		}
+		return nil
 	case <-c.ctx.Done():
-		// Fix: No need to close errChan since no goroutine is waiting for it
+		sb.Release()
+		return c.ctx.Err()
+	}
+}
+
+// 🆕 Async write method, lock-free design
+func (c *quicConnection) writeDataAsync(data []byte) error {
+	if c.closed.Load() {
+		return fmt.Errorf("connection closed")
+	}
+
+	// 🔧 CRITICAL FIX: Must copy data before async processing!
+	// The caller may reuse the buffer before our async write completes,
+	// causing data corruption (random byte modifications).
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	return c.writeDataAsyncNoCopy(dataCopy)
+}
+
+// 🆕 Zero-copy async write - caller guarantees data independence
+func (c *quicConnection) writeDataAsyncNoCopy(data []byte) error {
+	if c.closed.Load() {
+		return fmt.Errorf("connection closed")
+	}
+
+	req := &writeRequest{
+		data:    data,
+		errChan: nil, // No error channel = fire-and-forget
+	}
+
+	// 🔧 FIX: Block until channel has space or context canceled
+	// Don't timeout and drop data - that causes unnecessary packet loss
+	select {
+	case c.writeChan <- req:
+		return nil
+	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
 }
@@ -222,10 +263,11 @@ func (c *quicConnection) writeData(data []byte) error {
 // ReadMessage implements transport.Connection
 func (c *quicConnection) ReadMessage() ([]byte, error) {
 	select {
-	case data := <-c.readChan:
+	case data, ok := <-c.readChan:
+		if !ok {
+			return nil, io.EOF // receiveLoop ended: the stream is closed
+		}
 		return data, nil
-	case err := <-c.errorChan:
-		return nil, err
 	case <-c.ctx.Done():
 		return nil, c.ctx.Err()
 	}
@@ -235,15 +277,21 @@ func (c *quicConnection) ReadMessage() ([]byte, error) {
 func (c *quicConnection) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		c.closed = true
+		c.closed.Store(true)
 
 		// Cancel context
 		if c.cancel != nil {
 			c.cancel()
 		}
 
-		// 🆕 Close write queue
-		close(c.writeChan)
+		// Let writeLoop flush queued messages first: Close must not run
+		// concurrently with Write. The short deadline bounds the flush, since
+		// callers such as Gateway.Stop close clients one by one; it is enough
+		// for a final message like the gateway's rejection.
+		if c.stream != nil {
+			_ = c.stream.SetWriteDeadline(time.Now().Add(time.Second))
+		}
+		<-c.done
 
 		// Close stream
 		if c.stream != nil {
@@ -291,12 +339,33 @@ func (c *quicConnection) GetPassword() string {
 	return c.groupPassword
 }
 
+// =============================================================================
+// QUIC Datagram Support (for low-latency UDP relay)
+// =============================================================================
+
+// SendDatagram sends unreliable data via QUIC Datagram
+// Used for TUIC v5 native UDP relay mode - low latency, may lose packets
+// Implements transport.DatagramWriter interface
+func (c *quicConnection) SendDatagram(data []byte) error {
+	if c.conn == nil {
+		return fmt.Errorf("QUIC connection is nil")
+	}
+	return c.conn.SendDatagram(data)
+}
+
+// ReceiveDatagram receives unreliable data via QUIC Datagram
+// Implements transport.DatagramReader interface
+func (c *quicConnection) ReceiveDatagram() ([]byte, error) {
+	if c.conn == nil {
+		return nil, fmt.Errorf("QUIC connection is nil")
+	}
+	return c.conn.ReceiveDatagram(c.ctx)
+}
+
 // receiveLoop handles incoming messages
 func (c *quicConnection) receiveLoop() {
-	defer func() {
-		close(c.readChan)
-		close(c.errorChan)
-	}()
+	// Only readChan is closed, so ReadMessage returns queued data before io.EOF.
+	defer close(c.readChan)
 
 	for {
 		select {
@@ -305,15 +374,9 @@ func (c *quicConnection) receiveLoop() {
 		default:
 			data, err := c.readData()
 			if err != nil {
-				if err == io.EOF || isQUICError(err) {
-					return
-				}
-				select {
-				case c.errorChan <- err:
-				case <-c.ctx.Done():
-					return
-				}
-				continue
+				// A length-prefixed stream cannot recover from a read error.
+				logger.Debug("QUIC stream read ended", "client_id", c.clientID, "err", err)
+				return
 			}
 
 			select {

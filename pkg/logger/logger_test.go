@@ -76,7 +76,7 @@ func TestFileLogging(t *testing.T) {
 	tempDir := t.TempDir()
 	logFile := filepath.Join(tempDir, "test.log")
 
-	config := &config.LogConfig{
+	cfg := &config.LogConfig{
 		Level:      "debug",
 		Format:     "json",
 		Output:     "file",
@@ -87,16 +87,22 @@ func TestFileLogging(t *testing.T) {
 		Compress:   false,
 	}
 
-	err := Init(config)
+	err := Init(cfg)
 	if err != nil {
 		t.Fatalf("Failed to initialize logger: %v", err)
 	}
+	defer func() {
+		_ = Close()
+	}()
 
 	// Test logging
 	Info("test message", "key", "value")
 	Debug("debug message", "debug_key", "debug_value")
 	Warn("warning message", "warn_key", "warn_value")
 	Error("error message", "error_key", "error_value")
+
+	// Sync to ensure logs are flushed
+	_ = Sync()
 
 	// Check if log file was created
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {

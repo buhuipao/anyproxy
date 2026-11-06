@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
@@ -16,6 +18,21 @@ import (
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
 )
+
+const (
+	// udpSessionIdleTimeout closes a UDP session after no traffic in either direction.
+	udpSessionIdleTimeout = 60 * time.Second
+	// maxUDPSessionsPerListener bounds the UDP sources (one tunnel connection each) per forwarded port.
+	maxUDPSessionsPerListener = 1024
+	// udpSessionQueueSize is the number of packets a session can queue while it dials or writes.
+	udpSessionQueueSize = 256
+)
+
+// udpSession maps one external UDP source address to one tunnel connection.
+type udpSession struct {
+	packets    chan []byte
+	lastActive atomic.Int64 // Unix nanoseconds of the last packet in either direction
+}
 
 // PortKey represents a port with protocol information for unique identification
 type PortKey struct {
@@ -52,6 +69,9 @@ type PortListener struct {
 	Client     *ClientConn
 	ctx        context.Context
 	cancel     context.CancelFunc
+
+	udpMu       sync.Mutex
+	udpSessions map[string]*udpSession // UDP: external source address -> session
 }
 
 // NewPortForwardManager creates a new port forward manager.
@@ -89,6 +109,12 @@ func (pm *PortForwardManager) OpenPorts(client *ClientConn, openPorts []config.O
 		logger.Warn("Port opening rejected: manager is shutting down", "client_id", client.ID)
 		return fmt.Errorf("port forward manager is shutting down")
 	default:
+	}
+
+	// A stopped client must not open ports: CloseClientPorts may already have run for it
+	if client.ctx.Err() != nil {
+		logger.Warn("Port opening rejected: client connection is closed", "client_id", client.ID)
+		return fmt.Errorf("client connection is closed")
 	}
 
 	// Initialize client ports map if it doesn't exist
@@ -228,23 +254,27 @@ func (pm *PortForwardManager) createPortListener(client *ClientConn, openPort co
 	return portListener, nil
 }
 
+// close cancels the port listener and closes its socket, so the port is free when it returns.
+// It is safe to call more than once.
+func (pl *PortListener) close() {
+	pl.cancel()
+
+	// Close the appropriate connection based on protocol
+	if pl.Protocol == protocol.ProtocolTCP && pl.Listener != nil {
+		if err := pl.Listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warn("Error closing TCP listener", "port", pl.Port, "err", err)
+		}
+	} else if pl.PacketConn != nil {
+		if err := pl.PacketConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warn("Error closing UDP packet connection", "port", pl.Port, "err", err)
+		}
+	}
+}
+
 // handlePortListener handles port listener
 func (pm *PortForwardManager) handlePortListener(portListener *PortListener) {
 	defer func() {
-		// Cancel the port listener context
-		portListener.cancel()
-
-		// Close the appropriate connection based on protocol
-		if portListener.Protocol == protocol.ProtocolTCP && portListener.Listener != nil {
-			if err := portListener.Listener.Close(); err != nil {
-				logger.Warn("Error closing TCP listener", "port", portListener.Port, "err", err)
-			}
-		} else if portListener.PacketConn != nil {
-			if err := portListener.PacketConn.Close(); err != nil {
-				logger.Warn("Error closing UDP packet connection", "port", portListener.Port, "err", err)
-			}
-		}
-
+		portListener.close()
 		logger.Info("Port listener stopped", "port", portListener.Port, "client_id", portListener.ClientID)
 	}()
 
@@ -327,7 +357,7 @@ func (pm *PortForwardManager) handleUDPPortListener(portListener *PortListener) 
 		data []byte
 		addr net.Addr
 	}
-	packetCh := make(chan udpPacket, 10)
+	packetCh := make(chan udpPacket, 100000) // 🔧 FIX: Increased for 1Gbps+ UDP throughput
 	errCh := make(chan error, 1)
 
 	// Start reading packets in a separate goroutine
@@ -365,12 +395,7 @@ func (pm *PortForwardManager) handleUDPPortListener(portListener *PortListener) 
 			if !ok {
 				return
 			}
-			// Handle the UDP packet asynchronously
-			pm.wg.Add(1)
-			go func(data []byte, clientAddr net.Addr) {
-				defer pm.wg.Done()
-				pm.handleUDPPacket(portListener, data, clientAddr)
-			}(packet.data, packet.addr)
+			pm.handleUDPPacket(portListener, packet.data, packet.addr)
 		case err, ok := <-errCh:
 			if !ok {
 				return
@@ -386,16 +411,62 @@ func (pm *PortForwardManager) handleUDPPortListener(portListener *PortListener) 
 	}
 }
 
-// handleUDPPacket handles single UDP packet
+// handleUDPPacket queues a packet on the session for its source address.
+// A new source gets a new session, unless the listener already has too many.
 func (pm *PortForwardManager) handleUDPPacket(portListener *PortListener, data []byte, clientAddr net.Addr) {
+	key := clientAddr.String()
+
+	portListener.udpMu.Lock()
+	session, exists := portListener.udpSessions[key]
+	if !exists {
+		if len(portListener.udpSessions) >= maxUDPSessionsPerListener {
+			portListener.udpMu.Unlock()
+			logger.Warn("Dropping UDP packet from new source: too many UDP sessions", "port", portListener.Port, "client_id", portListener.ClientID, "client_addr", clientAddr, "max_sessions", maxUDPSessionsPerListener)
+			return
+		}
+		if portListener.udpSessions == nil {
+			portListener.udpSessions = make(map[string]*udpSession)
+		}
+		session = &udpSession{packets: make(chan []byte, udpSessionQueueSize)}
+		portListener.udpSessions[key] = session
+
+		pm.wg.Add(1)
+		go func() {
+			defer pm.wg.Done()
+			pm.runUDPSession(portListener, session, key, clientAddr)
+		}()
+	}
+	portListener.udpMu.Unlock()
+
+	select {
+	case session.packets <- data:
+	default:
+		logger.Debug("Dropping UDP packet: session queue full", "port", portListener.Port, "client_addr", clientAddr)
+	}
+}
+
+// runUDPSession sends one source's packets to the target over a single tunnel connection
+// and writes the target's responses back to that source. It ends when the session is idle,
+// the tunnel connection fails, or the listener closes.
+func (pm *PortForwardManager) runUDPSession(portListener *PortListener, session *udpSession, key string, clientAddr net.Addr) {
+	defer func() {
+		portListener.udpMu.Lock()
+		delete(portListener.udpSessions, key)
+		portListener.udpMu.Unlock()
+	}()
+
 	// Generate connection ID
 	connID := utils.GenerateConnID()
-	ctx := commonctx.WithConnID(context.Background(), connID)
+	ctx := commonctx.WithConnID(portListener.ctx, connID)
 
 	// Create target address
 	targetAddr := net.JoinHostPort(portListener.LocalHost, strconv.Itoa(portListener.LocalPort))
 
-	logger.Debug("New UDP packet to forwarded port", "port", portListener.Port, "client_id", portListener.ClientID, "conn_id", connID, "target", targetAddr, "client_addr", clientAddr, "data_size", len(data))
+	logger.Debug("New UDP session on forwarded port", "port", portListener.Port, "client_id", portListener.ClientID, "conn_id", connID, "target", targetAddr, "client_addr", clientAddr)
+
+	// Create connection record for UDP port forwarding
+	monitoring.CreateConnection(connID, portListener.ClientID, fmt.Sprintf("udp-port-forward:%d->%s", portListener.Port, targetAddr))
+	defer monitoring.CloseConnection(connID)
 
 	// Connect to target (using client's dial function)
 	targetConn, err := portListener.Client.dialNetwork(ctx, protocol.ProtocolUDP, targetAddr)
@@ -403,59 +474,62 @@ func (pm *PortForwardManager) handleUDPPacket(portListener *PortListener, data [
 		logger.Error("Failed to create UDP connection to target through client tunnel", "port", portListener.Port, "client_id", portListener.ClientID, "conn_id", connID, "target", targetAddr, "err", err)
 		return
 	}
+	session.lastActive.Store(time.Now().UnixNano())
+
+	// Send responses from the target back to the source
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		responseBuffer := make([]byte, 65536)
+		for {
+			n, err := targetConn.Read(responseBuffer)
+			if err != nil {
+				logger.Debug("UDP session tunnel read ended", "port", portListener.Port, "conn_id", connID, "err", err)
+				return
+			}
+			session.lastActive.Store(time.Now().UnixNano())
+			if _, err := portListener.PacketConn.WriteTo(responseBuffer[:n], clientAddr); err != nil {
+				logger.Error("Failed to send UDP response to client", "port", portListener.Port, "client_addr", clientAddr, "err", err)
+				continue
+			}
+			// Update monitoring statistics for UDP port forwarding (inbound response data)
+			monitoring.UpdateConnectionBytes(connID, portListener.ClientID, 0, int64(n))
+		}
+	}()
 	defer func() {
 		if err := targetConn.Close(); err != nil {
 			logger.Warn("Error closing UDP target connection", "err", err)
 		}
+		<-readerDone
 	}()
 
-	// Send data to target
-	_, err = targetConn.Write(data)
-	if err != nil {
-		logger.Error("Failed to send UDP data to target", "port", portListener.Port, "client_id", portListener.ClientID, "target", targetAddr, "err", err)
-		return
-	}
+	idleTimer := time.NewTimer(udpSessionIdleTimeout)
+	defer idleTimer.Stop()
 
-	// Create connection record for UDP port forwarding (outbound data)
-	monitoring.CreateConnection(connID, portListener.ClientID, fmt.Sprintf("udp-port-forward:%d->%s", portListener.Port, targetAddr))
-	monitoring.UpdateConnectionBytes(connID, portListener.ClientID, int64(len(data)), 0)
-
-	// Fix: Handle UDP response asynchronously to avoid unnecessary waiting
-	// Create a goroutine to wait for response, main function returns immediately
-	go func() {
-		// Use shorter timeout that is configurable
-		timeout := 1 * time.Second
-		if err := targetConn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-			logger.Warn("Failed to set read deadline for UDP response", "err", err)
-		}
-
-		// Read response from target
-		responseBuffer := make([]byte, 65536)
-		n, err := targetConn.Read(responseBuffer)
-		if err != nil {
-			// UDP often doesn't send responses, so this is not necessarily an error
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Debug("UDP response timeout (expected for many UDP protocols)", "port", portListener.Port, "timeout", timeout)
-			} else {
-				logger.Warn("Error reading UDP response", "port", portListener.Port, "err", err)
+	for {
+		select {
+		case <-portListener.ctx.Done():
+			return
+		case <-readerDone:
+			return
+		case data := <-session.packets:
+			if _, err := targetConn.Write(data); err != nil {
+				logger.Error("Failed to send UDP data to target", "port", portListener.Port, "client_id", portListener.ClientID, "target", targetAddr, "err", err)
+				return
 			}
+			session.lastActive.Store(time.Now().UnixNano())
+			// Update monitoring statistics for UDP port forwarding (outbound data)
+			monitoring.UpdateConnectionBytes(connID, portListener.ClientID, int64(len(data)), 0)
+		case <-idleTimer.C:
+			idle := time.Since(time.Unix(0, session.lastActive.Load()))
+			if idle < udpSessionIdleTimeout {
+				idleTimer.Reset(udpSessionIdleTimeout - idle)
+				continue
+			}
+			logger.Debug("Closing idle UDP session", "port", portListener.Port, "conn_id", connID, "client_addr", clientAddr, "idle_timeout", udpSessionIdleTimeout)
 			return
 		}
-
-		// Send response back to client
-		_, err = portListener.PacketConn.WriteTo(responseBuffer[:n], clientAddr)
-		if err != nil {
-			logger.Error("Failed to send UDP response to client", "port", portListener.Port, "client_addr", clientAddr, "err", err)
-			return
-		}
-
-		// Update monitoring statistics for UDP port forwarding (inbound response data)
-		monitoring.UpdateConnectionBytes(connID, portListener.ClientID, 0, int64(n))
-
-		logger.Debug("UDP response forwarded successfully", "port", portListener.Port, "client_addr", clientAddr, "target", targetAddr, "response_size", n, "response_time", timeout)
-	}()
-
-	logger.Debug("UDP request forwarded", "port", portListener.Port, "client_addr", clientAddr, "target", targetAddr, "request_size", len(data))
+	}
 }
 
 // handleForwardedConnection handles forwarded connection
@@ -534,7 +608,7 @@ func (pm *PortForwardManager) transferData(ctx context.Context, conn1, conn2 net
 	case <-done:
 		logger.Debug("Data transfer completed for port forwarding", "port", port)
 	case <-ctx.Done():
-		logger.Debug("Data transfer cancelled due to context", "port", port)
+		logger.Debug("Data transfer canceled due to context", "port", port)
 	}
 }
 
@@ -547,7 +621,7 @@ func (pm *PortForwardManager) copyDataWithContext(ctx context.Context, dst, src 
 		// Check context before each operation
 		select {
 		case <-ctx.Done():
-			logger.Debug("Data copy cancelled by context", "direction", direction, "port", port, "transferred_bytes", totalBytes)
+			logger.Debug("Data copy canceled by context", "direction", direction, "port", port, "transferred_bytes", totalBytes)
 			return
 		default:
 		}
@@ -628,8 +702,9 @@ func (pm *PortForwardManager) CloseClientPorts(clientID string) {
 			}
 		}
 
-		// Cancel the port listener context - this will gracefully stop all operations
-		portListener.cancel()
+		// Cancel and close the listener now, so a reconnecting client can open the same port.
+		// Its UDP sessions see the canceled context and close themselves.
+		portListener.close()
 
 		logger.Info("Port forwarding stopped for client", "client_id", clientID, "port", portListener.Port, "protocol", portListener.Protocol)
 	}

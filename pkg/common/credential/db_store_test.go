@@ -4,21 +4,15 @@
 package credential
 
 import (
+	"path/filepath"
 	"testing"
-
-	// Import database drivers for testing
-	_ "modernc.org/sqlite" // Pure Go SQLite driver (no CGO required)
-	// _ "github.com/go-sql-driver/mysql" // MySQL driver
-	// _ "github.com/lib/pq" // PostgreSQL driver
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestDBStore tests the database store implementation
-// To run these tests:
-// 1. Install the appropriate database driver: go get modernc.org/sqlite
-// 2. Run with build tag: go test -tags=dbtest ./...
+// To run these tests: go test -tags=dbtest ./pkg/common/credential/
 func TestDBStore(t *testing.T) {
 	// Example configuration for SQLite (in-memory)
 	config := &DBConfig{
@@ -47,17 +41,17 @@ func TestDBStore(t *testing.T) {
 
 	// Test Set and Get
 	t.Run("SetAndGet", func(t *testing.T) {
-		err := store.Set("group1", hashPassword("password1"))
+		err := store.Set("group1", "password1")
 		require.NoError(t, err)
 
 		hash, err := store.Get("group1")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
+		assert.Equal(t, "password1", hash)
 	})
 
 	// Test ValidatePassword
 	t.Run("ValidatePassword", func(t *testing.T) {
-		err := store.Set("group2", hashPassword("password2"))
+		err := store.Set("group2", "password2")
 		require.NoError(t, err)
 
 		valid := store.ValidatePassword("group2", "password2")
@@ -72,24 +66,24 @@ func TestDBStore(t *testing.T) {
 
 	// Test Update
 	t.Run("Update", func(t *testing.T) {
-		err := store.Set("group3", hashPassword("password3"))
+		err := store.Set("group3", "password3")
 		require.NoError(t, err)
 
 		hash1, err := store.Get("group3")
 		require.NoError(t, err)
 
-		err = store.Set("group3", hashPassword("newpassword3"))
+		err = store.Set("group3", "newpassword3")
 		require.NoError(t, err)
 
 		hash2, err := store.Get("group3")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("newpassword3"), hash2)
+		assert.Equal(t, "newpassword3", hash2)
 		assert.NotEqual(t, hash1, hash2)
 	})
 
 	// Test Delete
 	t.Run("Delete", func(t *testing.T) {
-		err := store.Set("group4", hashPassword("password4"))
+		err := store.Set("group4", "password4")
 		require.NoError(t, err)
 
 		err = store.Delete("group4")
@@ -101,18 +95,18 @@ func TestDBStore(t *testing.T) {
 
 	// Test Multiple Groups
 	t.Run("MultipleGroups", func(t *testing.T) {
-		err := store.Set("group5", hashPassword("password5"))
+		err := store.Set("group5", "password5")
 		require.NoError(t, err)
-		err = store.Set("group6", hashPassword("password6"))
+		err = store.Set("group6", "password6")
 		require.NoError(t, err)
 
 		hash5, err := store.Get("group5")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password5"), hash5)
+		assert.Equal(t, "password5", hash5)
 
 		hash6, err := store.Get("group6")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password6"), hash6)
+		assert.Equal(t, "password6", hash6)
 	})
 
 	// Test Non-existent Group
@@ -134,9 +128,36 @@ func TestDBStore(t *testing.T) {
 		require.NoError(t, err)
 		defer store.Close()
 
-		err = store.Set("test", hashPassword("test"))
+		err = store.Set("test", "test")
 		assert.NoError(t, err)
 	})
+}
+
+// Gateways that share one database must not both register different passwords
+func TestDBStore_SetIfAbsentSharedDB(t *testing.T) {
+	config := &DBConfig{
+		Driver:     "sqlite",
+		DataSource: filepath.Join(t.TempDir(), "credentials.db"),
+		TableName:  "credentials",
+	}
+	a, err := NewDBStore(config)
+	require.NoError(t, err)
+	defer a.Close()
+	b, err := NewDBStore(config)
+	require.NoError(t, err)
+	defer b.Close()
+
+	stored, err := a.SetIfAbsent("group1", "passwordA")
+	require.NoError(t, err)
+	assert.Equal(t, "passwordA", stored)
+
+	stored, err = b.SetIfAbsent("group1", "passwordB")
+	require.NoError(t, err)
+	assert.Equal(t, "passwordA", stored)
+
+	password, err := a.Get("group1")
+	require.NoError(t, err)
+	assert.Equal(t, "passwordA", password)
 }
 
 func TestDBStore_InvalidConnection(t *testing.T) {

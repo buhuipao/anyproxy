@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -79,19 +81,19 @@ func (t *grpcTransport) listenAndServe(addr string, handler func(transport.Conne
 	// Create gRPC server options
 	var opts []grpc.ServerOption
 
-	// Configure gRPC server-side keepalive parameters to prevent unexpected connection drops
+	// Configure gRPC server-side keepalive parameters for fast disconnect detection
 	opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{
-		MaxConnectionIdle:     24 * time.Hour,     // Close connection after 24 hours idle
+		MaxConnectionIdle:     15 * time.Second,   // Close connection after 15 seconds idle (fast detection)
 		MaxConnectionAge:      7 * 24 * time.Hour, // Maximum connection lifetime of 7 days
-		MaxConnectionAgeGrace: 5 * time.Minute,    // Connection close grace period of 5 minutes
-		Time:                  30 * time.Second,   // Server keepalive sending interval
-		Timeout:               5 * time.Second,    // Keepalive response timeout
+		MaxConnectionAgeGrace: 5 * time.Second,    // Connection close grace period of 5 seconds
+		Time:                  5 * time.Second,    // Server keepalive sending interval (fast detection)
+		Timeout:               10 * time.Second,   // Keepalive response timeout
 	}))
 
 	// Configure client keepalive policy
 	opts = append(opts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-		MinTime:             30 * time.Second, // Minimum client keepalive interval
-		PermitWithoutStream: true,             // Allow keepalive when no active streams
+		MinTime:             3 * time.Second, // Minimum client keepalive interval (allow fast keepalive)
+		PermitWithoutStream: true,            // Allow keepalive when no active streams
 	}))
 
 	// Configure TLS if provided
@@ -109,7 +111,7 @@ func (t *grpcTransport) listenAndServe(addr string, handler func(transport.Conne
 		transport: t,
 	})
 
-	logger.Info("gRPC server registered", "addr", addr, "keepalive_time", "30s", "max_idle", "5m", "max_age", "30m")
+	logger.Info("gRPC server registered", "addr", addr, "keepalive_time", "5s", "max_idle", "15s", "keepalive_timeout", "10s")
 
 	// Start serving in a goroutine
 	go func() {
@@ -206,13 +208,23 @@ func (s *transportServer) BiStream(stream TransportService_BiStreamServer) error
 
 	logger.Debug("gRPC connection attempt", "client_id", clientID, "group_id", groupID)
 
-	// Authentication check
-	if s.transport.authConfig != nil && s.transport.authConfig.Username != "" {
-		if username != s.transport.authConfig.Username || password != s.transport.authConfig.Password {
-			logger.Warn("gRPC connection rejected: invalid credentials", "client_id", clientID, "username", username)
-			return fmt.Errorf("unauthorized")
-		}
-		logger.Debug("Client authentication successful", "client_id", clientID)
+	// Authentication check (Gateway transport layer auth)
+	// Priority: 1. Dynamic client auth  2. Fixed gateway auth  3. No auth (dev mode)
+	authenticated, isClient := transport.ValidateCredentials(s.transport.authConfig, clientID, username, password)
+	if isClient {
+		logger.Debug("gRPC client authenticated via dynamic credentials", "client_id", clientID)
+	} else if authenticated {
+		logger.Debug("gRPC client authenticated via fixed/no-auth credentials", "client_id", clientID)
+	}
+
+	if !authenticated {
+		logger.Warn("gRPC connection rejected: invalid credentials", "client_id", clientID, "username", username)
+		return status.Error(codes.Unauthenticated, "unauthorized")
+	}
+
+	// Headers tell the client the stream was accepted; DialWithConfig waits for them.
+	if err := stream.SendHeader(metadata.MD{}); err != nil {
+		return err
 	}
 
 	logger.Info("Client connected via gRPC", "client_id", clientID, "group_id", groupID)
@@ -237,10 +249,11 @@ func (s *transportServer) BiStream(stream TransportService_BiStreamServer) error
 		}
 	}()
 
-	// Wait for stream context cancellation (connection close)
-	<-stream.Context().Done()
+	// Wait until the connection is closed (by the handler, the gateway, or the
+	// stream ending) and its queued messages are flushed. Returning ends the RPC.
+	<-conn.done
 
-	logger.Debug("gRPC stream context cancelled", "client_id", clientID, "err", stream.Context().Err())
+	logger.Debug("gRPC connection closed", "client_id", clientID, "err", stream.Context().Err())
 
 	logger.Info("Client disconnected from gRPC", "client_id", clientID, "group_id", groupID)
 

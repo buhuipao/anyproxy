@@ -42,11 +42,11 @@ print_step "Checking Go version"
 if command -v go &> /dev/null; then
     GO_CURRENT_VERSION=$(go version | grep -o 'go[0-9]\+\.[0-9]\+' | sed 's/go//')
     echo "Current Go version: $GO_CURRENT_VERSION"
-    # Check if Go version is >= 1.23
-    if version_gte "$GO_CURRENT_VERSION" "1.23"; then
-        print_success "Go version $GO_CURRENT_VERSION is compatible (>= 1.23)"
+    # Check if Go version is >= 1.25
+    if version_gte "$GO_CURRENT_VERSION" "1.25"; then
+        print_success "Go version $GO_CURRENT_VERSION is compatible (>= 1.25)"
     else
-        print_error "Go version $GO_CURRENT_VERSION is too old (required >= 1.23)"
+        print_error "Go version $GO_CURRENT_VERSION is too old (required >= 1.25)"
         exit 1
     fi
 else

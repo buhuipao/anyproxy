@@ -4,20 +4,27 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
+
+	// Database drivers for the documented driver names. All are pure Go, so CGO_ENABLED=0 builds keep working.
+	"github.com/go-sql-driver/mysql" // registers "mysql"
+	_ "github.com/lib/pq"            // registers "postgres"
+	_ "modernc.org/sqlite"           // registers "sqlite"
 )
 
 // DBStore implements database-based credential storage
 type DBStore struct {
 	db            *sql.DB
 	tableName     string
+	dollarParams  bool // postgres takes $1, $2, ... instead of ?
 	mu            sync.RWMutex
 	preparedStmts map[string]*sql.Stmt
 }
 
 // DBConfig holds database configuration
 type DBConfig struct {
-	Driver     string // Database driver: mysql, postgres, sqlite3
+	Driver     string // Database driver: mysql, postgres, sqlite
 	DataSource string // Connection string
 	TableName  string // Table name for credentials
 }
@@ -44,7 +51,18 @@ func NewDBStore(config *DBConfig) (*DBStore, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open(config.Driver, config.DataSource)
+	dataSource := config.DataSource
+	if config.Driver == "mysql" {
+		// Set counts matched rows, but MySQL counts only changed rows unless clientFoundRows is set
+		mysqlConfig, err := mysql.ParseDSN(dataSource)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mysql data_source: %v", err)
+		}
+		mysqlConfig.ClientFoundRows = true
+		dataSource = mysqlConfig.FormatDSN()
+	}
+
+	db, err := sql.Open(config.Driver, dataSource)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
 	}
@@ -57,6 +75,7 @@ func NewDBStore(config *DBConfig) (*DBStore, error) {
 	store := &DBStore{
 		db:            db,
 		tableName:     config.TableName,
+		dollarParams:  config.Driver == "postgres",
 		preparedStmts: make(map[string]*sql.Stmt),
 	}
 
@@ -71,6 +90,24 @@ func NewDBStore(config *DBConfig) (*DBStore, error) {
 	}
 
 	return store, nil
+}
+
+// bind rewrites the ? placeholders in query as $1, $2, ... for postgres
+func (ds *DBStore) bind(query string) string {
+	if !ds.dollarParams {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range query {
+		if r == '?' {
+			n++
+			fmt.Fprintf(&b, "$%d", n)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // createTable creates the credentials table if it doesn't exist
@@ -100,7 +137,7 @@ func (ds *DBStore) prepareStatements() error {
 	}
 
 	for name, query := range statements {
-		stmt, err := ds.db.Prepare(query)
+		stmt, err := ds.db.Prepare(ds.bind(query))
 		if err != nil {
 			return fmt.Errorf("failed to prepare %s statement: %v", name, err)
 		}
@@ -110,8 +147,8 @@ func (ds *DBStore) prepareStatements() error {
 	return nil
 }
 
-// Set stores or updates password hash
-func (ds *DBStore) Set(groupID string, passwordHash string) error {
+// Set stores or updates password (raw, not hashed)
+func (ds *DBStore) Set(groupID string, password string) error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -121,7 +158,7 @@ func (ds *DBStore) Set(groupID string, passwordHash string) error {
 		`UPDATE %s SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE group_id = ?`,
 		ds.tableName)
 
-	result, err := ds.db.Exec(updateQuery, passwordHash, groupID)
+	result, err := ds.db.Exec(ds.bind(updateQuery), password, groupID)
 	if err != nil {
 		return fmt.Errorf("failed to update credentials: %v", err)
 	}
@@ -138,7 +175,7 @@ func (ds *DBStore) Set(groupID string, passwordHash string) error {
 			`INSERT INTO %s (group_id, password_hash) VALUES (?, ?)`,
 			ds.tableName)
 
-		_, err = ds.db.Exec(insertQuery, groupID, passwordHash)
+		_, err = ds.db.Exec(ds.bind(insertQuery), groupID, password)
 		if err != nil {
 			return fmt.Errorf("failed to insert credentials: %v", err)
 		}
@@ -147,14 +184,35 @@ func (ds *DBStore) Set(groupID string, passwordHash string) error {
 	return nil
 }
 
-// Get retrieves password hash
+// SetIfAbsent inserts the password unless the group already has one, and returns the stored password.
+// The primary key makes this safe for gateways that share the database.
+func (ds *DBStore) SetIfAbsent(groupID string, password string) (string, error) {
+	// Table name is validated in NewDBStore, safe to use in query
+	insertQuery := fmt.Sprintf( // #nosec G201 - table name is validated
+		`INSERT INTO %s (group_id, password_hash) VALUES (?, ?)`,
+		ds.tableName)
+
+	_, insertErr := ds.db.Exec(ds.bind(insertQuery), groupID, password)
+	if insertErr == nil {
+		return password, nil
+	}
+
+	// The insert fails when the group already has a row; return its password
+	stored, err := ds.Get(groupID)
+	if err != nil {
+		return "", fmt.Errorf("failed to insert credentials: %v", insertErr)
+	}
+	return stored, nil
+}
+
+// Get retrieves password
 func (ds *DBStore) Get(groupID string) (string, error) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 
 	stmt := ds.preparedStmts["get"]
-	var passwordHash string
-	err := stmt.QueryRow(groupID).Scan(&passwordHash)
+	var password string
+	err := stmt.QueryRow(groupID).Scan(&password)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("credentials not found for group: %s", groupID)
@@ -162,7 +220,7 @@ func (ds *DBStore) Get(groupID string) (string, error) {
 		return "", fmt.Errorf("failed to get credentials: %v", err)
 	}
 
-	return passwordHash, nil
+	return password, nil
 }
 
 // Delete removes password
@@ -179,14 +237,42 @@ func (ds *DBStore) Delete(groupID string) error {
 	return nil
 }
 
-// ValidatePassword checks password validity
+// ValidatePassword checks password validity (direct comparison, no hash)
 func (ds *DBStore) ValidatePassword(groupID string, password string) bool {
-	hash, err := ds.Get(groupID)
+	storedPassword, err := ds.Get(groupID)
 	if err != nil {
 		return false
 	}
 
-	return hash == hashPassword(password)
+	return storedPassword == password
+}
+
+// GetAll returns all stored credentials
+func (ds *DBStore) GetAll() map[string]string {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+
+	result := make(map[string]string)
+
+	// Table name is validated in NewDBStore, safe to use in query
+	query := fmt.Sprintf( // #nosec G201 - table name is validated
+		`SELECT group_id, password_hash FROM %s`, ds.tableName)
+
+	rows, err := ds.db.Query(query)
+	if err != nil {
+		return result
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var groupID, password string
+		if err := rows.Scan(&groupID, &password); err != nil {
+			continue
+		}
+		result[groupID] = password
+	}
+
+	return result
 }
 
 // Close closes the database connection

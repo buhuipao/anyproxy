@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/buhuipao/anyproxy/pkg/common/message"
+	"github.com/buhuipao/anyproxy/pkg/common/buffer"
+	"github.com/buhuipao/anyproxy/pkg/common/connection"
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
+	"github.com/buhuipao/anyproxy/pkg/transport"
 )
 
 // mockNetConn implements net.Conn for testing
@@ -91,11 +95,28 @@ func createTestClientConn() (*ClientConn, *mockConnectionExt) {
 		ctx:            ctx,
 		cancel:         cancel,
 		portForwardMgr: NewPortForwardManager(),
+		smartWriter:    buffer.NewSmartWriter(mockConn, "test-client"),
 	}
-	// Initialize msgHandler
-	client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
-
 	return client, mockConn
+}
+
+// createMessageChannel registers a message channel for connID and starts its
+// processor, as dialNetwork does after a successful connect_response.
+func (c *ClientConn) createMessageChannel(connID string) {
+	msgChan := make(chan map[string]interface{}, protocol.DefaultMessageChannelSize)
+	var done chan struct{}
+	c.connMu.Lock()
+	c.msgChans[connID] = msgChan
+	if proxyConn, ok := c.Conns[connID]; ok {
+		done = proxyConn.Done
+	}
+	c.connMu.Unlock()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.processConnectionMessages(done, msgChan)
+	}()
 }
 
 func TestClientConn_Stop(t *testing.T) {
@@ -108,9 +129,15 @@ func TestClientConn_Stop(t *testing.T) {
 		Done:      make(chan struct{}),
 	}
 	client.msgChans["conn1"] = make(chan map[string]interface{}, 1)
+	monitoring.CreateConnection("conn1", client.ID, "example.com:80")
 
 	// Test Stop
 	client.Stop()
+
+	// Verify the connection is removed from monitoring too
+	if _, exists := monitoring.GetAllConnectionMetrics()["conn1"]; exists {
+		t.Error("Expected connection to be removed from monitoring after Stop")
+	}
 
 	// Verify context is canceled
 	select {
@@ -142,17 +169,9 @@ func TestClientConn_DialNetwork(t *testing.T) {
 	}
 	mockConn.hasMessages = true
 
-	// Use a channel to signal when the message handler is ready
-	handlerReady := make(chan struct{})
-
-	// Start message handling in background
-	go func() {
-		close(handlerReady) // Signal that handler is starting
-		client.handleMessage()
-	}()
-
-	// Wait for handler to be ready
-	<-handlerReady
+	// ReadMessage blocks until the connect message is sent, so the response
+	// carries the real connection ID
+	mockConn.readChan = make(chan struct{})
 
 	// Create a mock dialer that tracks the connection ID
 	mockConn.writeMessageFunc = func(data []byte) error {
@@ -163,12 +182,18 @@ func TestClientConn_DialNetwork(t *testing.T) {
 				connID, _, _, err := protocol.UnpackConnectMessage(payload)
 				if err == nil {
 					// Update the response message with the correct ID
+					mockConn.mu.Lock()
 					mockConn.messages[0]["id"] = connID
+					mockConn.mu.Unlock()
+					close(mockConn.readChan)
 				}
 			}
 		}
 		return nil
 	}
+
+	// Start message handling in background
+	go client.handleMessage()
 
 	// Test dial
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -186,6 +211,50 @@ func TestClientConn_DialNetwork(t *testing.T) {
 	// Clean up
 	conn.Close()
 	client.Stop()
+}
+
+// dialNetwork must be the only reader of the connect_response: a success must
+// return a connection, a failure must return an error without panicking, and
+// the caller's ctx must end the wait.
+func TestClientConn_DialNetworkConnectResponse(t *testing.T) {
+	for _, success := range []bool{true, false} {
+		client, mockConn := createTestClientConn()
+		mockConn.writeMessageFunc = func(data []byte) error {
+			_, msgType, payload, err := protocol.UnpackBinaryHeader(data)
+			if err == nil && msgType == protocol.BinaryMsgTypeConnect {
+				connID, _, _, _ := protocol.UnpackConnectMessage(payload)
+				go client.routeMessage(map[string]interface{}{
+					"type":    protocol.MsgTypeConnectResponse,
+					"id":      connID,
+					"success": success,
+					"error":   "connection refused",
+				})
+			}
+			return nil
+		}
+
+		for i := 0; i < 100; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			conn, err := client.dialNetwork(ctx, "tcp", "example.com:80")
+			cancel()
+			if success != (err == nil) {
+				t.Fatalf("success=%v dial %d: unexpected result: %v", success, i, err)
+			}
+			if conn != nil {
+				conn.Close()
+			}
+		}
+		client.Stop()
+	}
+
+	// No response at all: the caller's ctx ends the dial
+	client, _ := createTestClientConn()
+	defer client.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := client.dialNetwork(ctx, "tcp", "example.com:80"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline error, got %v", err)
+	}
 }
 
 func TestClientConn_HandleMessage(t *testing.T) {
@@ -404,7 +473,7 @@ func TestClientConn_RouteMessage(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "create channel for connect response",
+			name: "ignore connect response for unknown connection",
 			msg: map[string]interface{}{
 				"type": protocol.MsgTypeConnectResponse,
 				"id":   "conn2",
@@ -442,11 +511,12 @@ func TestClientConn_RouteMessage(t *testing.T) {
 			client.routeMessage(tt.msg)
 
 			// Use synchronous verification instead of sleep
-			// Verify channel creation for connect_response
+			// A late connect_response (the dial was already given up) must
+			// not create a channel nobody will clean up
 			if tt.msg["type"] == protocol.MsgTypeConnectResponse {
 				if connID, ok := tt.msg["id"].(string); ok {
-					if _, exists := client.msgChans[connID]; !exists {
-						t.Error("Channel should have been created for connect_response")
+					if _, exists := client.msgChans[connID]; exists {
+						t.Error("Channel should not be created for connect_response of unknown connection")
 					}
 				}
 			}
@@ -466,6 +536,146 @@ func TestClientConn_RouteMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Connections whose users stopped reading must not block the client's shared
+// read loop: each is closed shortly after its message channel is full and the
+// client is told, while other connections keep receiving data. A full UDP
+// channel only drops the packet.
+func TestClientConn_RouteMessageStalledConnection(t *testing.T) {
+	client, mockConn := createTestClientConn()
+	defer client.Stop()
+
+	closeSent := make(chan string, 10)
+	mockConn.writeMessageFunc = func(data []byte) error {
+		_, msgType, payload, err := protocol.UnpackBinaryHeader(data)
+		if err == nil && msgType == protocol.BinaryMsgTypeClose {
+			connID, _ := protocol.UnpackCloseMessage(payload)
+			closeSent <- connID
+		}
+		return nil
+	}
+
+	addConn := func(connID string) net.Conn {
+		userSide, gatewaySide := connection.NewBufferedConnPair(connection.TCPBufferSize, false)
+		client.connMu.Lock()
+		client.Conns[connID] = &Conn{ID: connID, LocalConn: gatewaySide, Done: make(chan struct{})}
+		client.connMu.Unlock()
+		client.createMessageChannel(connID)
+		return userSide
+	}
+	addConn("slow1") // users never read
+	addConn("slow2")
+	fast := addConn("fast")
+
+	// Act as the shared read loop: overfill both slow connections, then route
+	// one message to the fast connection.
+	routed := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		for i := 0; i < connection.TCPBufferSize+protocol.DefaultMessageChannelSize+10; i++ {
+			client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "slow1", "data": []byte("x")})
+			client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "slow2", "data": []byte("x")})
+		}
+		client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "fast", "data": []byte("hello")})
+		routed <- time.Since(start)
+	}()
+
+	select {
+	case d := <-routed:
+		if d > 2*time.Second {
+			t.Errorf("shared read loop was blocked for %v by the stalled connections", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("shared read loop is still blocked by the stalled connections")
+	}
+
+	closed := map[string]bool{}
+	for len(closeSent) > 0 {
+		closed[<-closeSent] = true
+	}
+	if !closed["slow1"] || !closed["slow2"] || len(closed) != 2 {
+		t.Errorf("close sent for %v, want slow1 and slow2", closed)
+	}
+
+	client.connMu.RLock()
+	_, slow1Exists := client.Conns["slow1"]
+	_, slow2Exists := client.Conns["slow2"]
+	client.connMu.RUnlock()
+	if slow1Exists || slow2Exists {
+		t.Error("stalled connections should have been closed")
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 16)
+		n, _ := fast.Read(buf)
+		got <- string(buf[:n])
+	}()
+	select {
+	case data := <-got:
+		if data != "hello" {
+			t.Errorf("fast connection got %q, want \"hello\"", data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("fast connection did not receive its data")
+	}
+
+	// UDP: a full channel drops the packet and keeps the connection
+	client.connMu.Lock()
+	client.Conns["udp"] = &Conn{ID: "udp", LocalConn: &mockNetConn{}, Done: make(chan struct{}), IsUDP: true}
+	client.msgChans["udp"] = make(chan map[string]interface{}, 1)
+	client.connMu.Unlock()
+	for i := 0; i < 2; i++ {
+		client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "udp", "data": []byte("x")})
+	}
+	client.connMu.RLock()
+	_, udpExists := client.Conns["udp"]
+	client.connMu.RUnlock()
+	if !udpExists || len(closeSent) > 0 {
+		t.Error("UDP connection should stay open when its channel is full")
+	}
+}
+
+// A channel can also fill when its processor was not scheduled yet while the
+// read loop drained a backlog. A processor that is only late must not get its
+// connection closed.
+func TestClientConn_RouteMessageProcessorLate(t *testing.T) {
+	client, mockConn := createTestClientConn()
+	defer client.Stop()
+
+	closeSent := false
+	mockConn.writeMessageFunc = func(data []byte) error {
+		_, msgType, _, err := protocol.UnpackBinaryHeader(data)
+		if err == nil && msgType == protocol.BinaryMsgTypeClose {
+			closeSent = true
+		}
+		return nil
+	}
+
+	_, gatewaySide := connection.NewBufferedConnPair(connection.TCPBufferSize, false)
+	proxyConn := &Conn{ID: "conn1", LocalConn: gatewaySide, Done: make(chan struct{})}
+	msgChan := make(chan map[string]interface{}, protocol.DefaultMessageChannelSize)
+	client.connMu.Lock()
+	client.Conns["conn1"] = proxyConn
+	client.msgChans["conn1"] = msgChan
+	client.connMu.Unlock()
+
+	// The read loop fills the channel before the processor runs
+	for i := 0; i < protocol.DefaultMessageChannelSize; i++ {
+		client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "conn1", "data": []byte("x")})
+	}
+	time.AfterFunc(10*time.Millisecond, func() {
+		client.processConnectionMessages(proxyConn.Done, msgChan)
+	})
+	client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": "conn1", "data": []byte("x")})
+
+	client.connMu.RLock()
+	_, exists := client.Conns["conn1"]
+	client.connMu.RUnlock()
+	if !exists || closeSent {
+		t.Error("connection with a late processor should not be closed")
 	}
 }
 
@@ -589,6 +799,52 @@ func TestClientConn_HandleDataMessage(t *testing.T) {
 			// Give time for processing
 			time.Sleep(50 * time.Millisecond)
 		})
+	}
+}
+
+// The user writes its last bytes and closes while the client is still
+// sending data. The failed local write must not stop handleConnection
+// from forwarding those bytes and telling the client to close.
+func TestClientConn_HandleDataMessageAfterUserClose(t *testing.T) {
+	client, mockConn := createTestClientConn()
+	defer client.Stop()
+
+	var forwarded []byte
+	closeSent := false
+	mockConn.writeMessageFunc = func(data []byte) error {
+		_, msgType, payload, err := protocol.UnpackBinaryHeader(data)
+		if err != nil {
+			return nil
+		}
+		switch msgType {
+		case protocol.BinaryMsgTypeData:
+			_, d, _ := protocol.UnpackDataMessage(payload)
+			forwarded = append(forwarded, d...)
+		case protocol.BinaryMsgTypeClose:
+			closeSent = true
+		}
+		return nil
+	}
+
+	userSide, gatewaySide := connection.NewBufferedConnPair(connection.TCPBufferSize, false)
+	proxyConn := &Conn{ID: "conn1", LocalConn: gatewaySide, Done: make(chan struct{})}
+	client.Conns["conn1"] = proxyConn
+
+	if _, err := userSide.Write([]byte("last bytes")); err != nil {
+		t.Fatal(err)
+	}
+	userSide.Close()
+
+	// Data from the target arrives after the user closed
+	client.handleDataMessage(map[string]interface{}{"id": "conn1", "data": []byte("server data")})
+
+	client.handleConnection(proxyConn)
+
+	if string(forwarded) != "last bytes" {
+		t.Errorf("forwarded %q, want \"last bytes\"", forwarded)
+	}
+	if !closeSent {
+		t.Error("client was not told to close the connection")
 	}
 }
 
@@ -754,6 +1010,15 @@ func (m *mockConnectionExt) WriteMessage(data []byte) error {
 	return m.writeErr
 }
 
+// WriteStreamBuffer implements transport.StreamBufferWriter for the test mock.
+// Delegates to WriteMessage after extracting the full buffer contents.
+func (m *mockConnectionExt) WriteStreamBuffer(sb transport.StreamBuffer) error {
+	data := make([]byte, sb.TotalLen())
+	copy(data, sb.Full())
+	sb.Release()
+	return m.WriteMessage(data)
+}
+
 func (m *mockConnectionExt) Read(p []byte) (n int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -803,4 +1068,165 @@ func (m *mockConnectionExt) SetReadDeadline(t time.Time) error {
 
 func (m *mockConnectionExt) SetWriteDeadline(t time.Time) error {
 	return nil
+}
+
+// ==================== Heartbeat Tests ====================
+
+func TestClientConn_HandleHeartbeat(t *testing.T) {
+	// Initialize port forward manager
+	portForwardMgr := NewPortForwardManager()
+
+	t.Run("handle heartbeat message", func(t *testing.T) {
+		clientID := "test-client-heartbeat"
+		groupID := "test-group"
+		timestamp := time.Now().UnixNano()
+
+		// Create mock connection that will capture written messages
+		var writtenData []byte
+		mockConn := &mockConnectionExt{
+			clientID: clientID,
+			groupID:  groupID,
+			writeMessageFunc: func(data []byte) error {
+				writtenData = data
+				return nil
+			},
+		}
+
+		// Create client connection
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := &ClientConn{
+			ID:             clientID,
+			GroupID:        groupID,
+			Conn:           mockConn,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            ctx,
+			cancel:         cancel,
+			portForwardMgr: portForwardMgr,
+		}
+
+		// Create heartbeat message
+		heartbeatMsg := map[string]interface{}{
+			"type":      protocol.MsgTypeHeartbeat,
+			"client_id": clientID,
+			"timestamp": timestamp,
+		}
+
+		// Handle heartbeat
+		client.handleHeartbeat(heartbeatMsg)
+
+		// Verify heartbeat ack was sent
+		if len(writtenData) == 0 {
+			t.Error("Expected heartbeat ack to be written")
+		}
+
+		// Verify the written data is a heartbeat ack
+		if protocol.IsBinaryMessage(writtenData) {
+			_, msgType, payload, err := protocol.UnpackBinaryHeader(writtenData)
+			if err != nil {
+				t.Fatalf("Failed to unpack written data: %v", err)
+			}
+
+			if msgType != protocol.BinaryMsgTypeHeartbeatAck {
+				t.Errorf("Expected heartbeat ack message type %d, got %d", protocol.BinaryMsgTypeHeartbeatAck, msgType)
+			}
+
+			// Verify timestamp in ack
+			ackTimestamp, err := protocol.UnpackHeartbeatAckMessage(payload)
+			if err != nil {
+				t.Fatalf("Failed to unpack heartbeat ack: %v", err)
+			}
+
+			if ackTimestamp != timestamp {
+				t.Errorf("Expected timestamp %d, got %d", timestamp, ackTimestamp)
+			}
+		}
+	})
+
+	t.Run("handle heartbeat with mismatched client ID", func(t *testing.T) {
+		clientID := "test-client"
+		groupID := "test-group"
+		differentClientID := "different-client"
+		timestamp := time.Now().UnixNano()
+
+		var writtenData []byte
+		mockConn := &mockConnectionExt{
+			clientID: clientID,
+			groupID:  groupID,
+			writeMessageFunc: func(data []byte) error {
+				writtenData = data
+				return nil
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := &ClientConn{
+			ID:             clientID,
+			GroupID:        groupID,
+			Conn:           mockConn,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            ctx,
+			cancel:         cancel,
+			portForwardMgr: portForwardMgr,
+		}
+
+		// Create heartbeat message with different client ID
+		heartbeatMsg := map[string]interface{}{
+			"type":      protocol.MsgTypeHeartbeat,
+			"client_id": differentClientID, // Different from connection's client ID
+			"timestamp": timestamp,
+		}
+
+		// Handle heartbeat - should still respond
+		client.handleHeartbeat(heartbeatMsg)
+
+		// Verify heartbeat ack was still sent
+		if len(writtenData) == 0 {
+			t.Error("Expected heartbeat ack to be written even with mismatched client ID")
+		}
+	})
+
+	t.Run("handle heartbeat with write error", func(t *testing.T) {
+		clientID := "test-client"
+		groupID := "test-group"
+		timestamp := time.Now().UnixNano()
+
+		mockConn := &mockConnectionExt{
+			clientID: clientID,
+			groupID:  groupID,
+			writeMessageFunc: func(data []byte) error {
+				return fmt.Errorf("write error")
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := &ClientConn{
+			ID:             clientID,
+			GroupID:        groupID,
+			Conn:           mockConn,
+			Conns:          make(map[string]*Conn),
+			msgChans:       make(map[string]chan map[string]interface{}),
+			ctx:            ctx,
+			cancel:         cancel,
+			portForwardMgr: portForwardMgr,
+		}
+
+		// Create heartbeat message
+		heartbeatMsg := map[string]interface{}{
+			"type":      protocol.MsgTypeHeartbeat,
+			"client_id": clientID,
+			"timestamp": timestamp,
+		}
+
+		// Handle heartbeat - should not panic even if write fails
+		client.handleHeartbeat(heartbeatMsg)
+		// Test passes if no panic
+	})
 }

@@ -71,17 +71,11 @@ func parseAddress(network, address string) net.Addr {
 
 	port, _ := strconv.Atoi(portStr)
 
-	// Parse IP address
+	// Parse IP address. Domain names are not resolved here: the client at
+	// the far end of the tunnel does the lookup, so use 0.0.0.0.
 	ip := net.ParseIP(host)
 	if ip == nil {
-		// If not a valid IP, try to resolve it
-		ips, err := net.LookupIP(host)
-		if err == nil && len(ips) > 0 {
-			ip = ips[0]
-		} else {
-			// Default to 0.0.0.0 if resolution fails
-			ip = net.IPv4(0, 0, 0, 0)
-		}
+		ip = net.IPv4(0, 0, 0, 0)
 	}
 
 	// Return appropriate address type based on network protocol
@@ -107,6 +101,13 @@ func (cw *ConnWrapper) LocalAddr() net.Addr {
 // RemoteAddr returns the remote network address
 func (cw *ConnWrapper) RemoteAddr() net.Addr {
 	return cw.remoteAddr
+}
+
+// CloseWrite closes the whole connection. The tunnel has no half-close, so a
+// relay that half-closes when one direction ends (such as go-socks5) must end
+// the stream, or the other direction blocks on Read forever.
+func (cw *ConnWrapper) CloseWrite() error {
+	return cw.Close()
 }
 
 // GetConnID returns the connection ID

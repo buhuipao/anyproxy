@@ -12,7 +12,7 @@ permissions:
   packages: write
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.25'
   PROJECT_NAME: anyproxy
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
 
     - name: Install golangci-lint
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.1.6
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.15.0
         golangci-lint run --timeout=10m
 
   test:
@@ -156,15 +156,23 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    env:
+      # Step conditions cannot read secrets directly. Without Docker Hub
+      # credentials, the image is still built but not pushed.
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    # The arm64 image runs RUN steps under emulation
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
     - name: Log in to Docker Hub
-      if: github.event_name != 'pull_request'
+      if: github.event_name != 'pull_request' && env.DOCKER_USERNAME != ''
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
@@ -174,20 +182,21 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ secrets.DOCKER_USERNAME }}/${{ env.PROJECT_NAME }}
+        images: ${{ env.DOCKER_USERNAME || github.repository_owner }}/${{ env.PROJECT_NAME }}
+        # A push to main tags :main only. type=semver adds :latest
+        # (flavor latest=auto) for a release tag, but not for a pre-release.
         tags: |
           type=ref,event=branch
           type=ref,event=pr
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable={{is_default_branch}}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
         platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name != 'pull_request' }}
+        push: ${{ github.event_name != 'pull_request' && env.DOCKER_USERNAME != '' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha

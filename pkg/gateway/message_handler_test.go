@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 )
 
@@ -137,8 +136,6 @@ func TestReadNextMessage(t *testing.T) {
 				readErr:  tt.readErr,
 			}
 			client.Conn = mockConn
-			// Initialize msgHandler
-			client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
 
 			msg, err := client.readNextMessage()
 			if (err != nil) != tt.wantErr {
@@ -214,8 +211,6 @@ func TestParseBinaryMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockConn := &mockTransportConn{}
 			client.Conn = mockConn
-			// Initialize msgHandler
-			client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
 
 			msg, err := parseBinaryMessageForTest(tt.msgData)
 			if (err != nil) != tt.wantErr {
@@ -235,32 +230,9 @@ func TestWriteMessages(t *testing.T) {
 		GroupID: "test-group",
 	}
 
-	t.Run("writeDataMessage", func(t *testing.T) {
-		mockConn := &mockTransportConn{}
-		client.Conn = mockConn
-		// Initialize msgHandler
-		client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
-
-		err := client.writeDataMessage("conn1", []byte("test data"))
-		if err != nil {
-			t.Fatalf("writeDataMessage failed: %v", err)
-		}
-
-		if len(mockConn.writeData) != 1 {
-			t.Fatalf("expected 1 message written, got %d", len(mockConn.writeData))
-		}
-
-		// Verify it's a binary message
-		if !protocol.IsBinaryMessage(mockConn.writeData[0]) {
-			t.Error("expected binary message format")
-		}
-	})
-
 	t.Run("writeConnectMessage", func(t *testing.T) {
 		mockConn := &mockTransportConn{}
 		client.Conn = mockConn
-		// Initialize msgHandler
-		client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
 
 		err := client.writeConnectMessage("conn1", "tcp", "example.com:80")
 		if err != nil {
@@ -275,8 +247,6 @@ func TestWriteMessages(t *testing.T) {
 	t.Run("writeCloseMessage", func(t *testing.T) {
 		mockConn := &mockTransportConn{}
 		client.Conn = mockConn
-		// Initialize msgHandler
-		client.msgHandler = message.NewGatewayExtendedMessageHandler(mockConn)
 
 		err := client.writeCloseMessage("conn1")
 		if err != nil {

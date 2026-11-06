@@ -2,16 +2,16 @@
 package gateway
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/credential"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
-	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
+	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	"github.com/buhuipao/anyproxy/pkg/web/session"
 )
 
 // HTTP methods and status constants
@@ -21,157 +21,60 @@ const (
 	statusActive = "active"
 )
 
-// Session represents a user session
-type Session struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	CreatedAt time.Time `json:"created_at"`
-	LastSeen  time.Time `json:"last_seen"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// SessionManager manages user sessions
-type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	timeout  time.Duration
-}
-
-// NewSessionManager creates a new session manager
-func NewSessionManager(timeout time.Duration) *SessionManager {
-	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		timeout:  timeout,
-	}
-
-	// Start cleanup goroutine
-	go sm.cleanupExpiredSessions()
-
-	return sm
-}
-
-// CreateSession creates a new session for the user
-func (sm *SessionManager) CreateSession(username string) *Session {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	sessionID := sm.generateSessionID()
-	now := time.Now()
-
-	session := &Session{
-		ID:        sessionID,
-		Username:  username,
-		CreatedAt: now,
-		LastSeen:  now,
-		ExpiresAt: now.Add(sm.timeout),
-	}
-
-	sm.sessions[sessionID] = session
-	return session
-}
-
-// GetSession retrieves a session by ID
-func (sm *SessionManager) GetSession(sessionID string) *Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	session, exists := sm.sessions[sessionID]
-	if !exists || session.ExpiresAt.Before(time.Now()) {
-		return nil
-	}
-
-	return session
-}
-
-// UpdateSession updates the last seen time for a session
-func (sm *SessionManager) UpdateSession(sessionID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if session, exists := sm.sessions[sessionID]; exists {
-		session.LastSeen = time.Now()
-		session.ExpiresAt = time.Now().Add(sm.timeout)
-	}
-}
-
-// DeleteSession deletes a session
-func (sm *SessionManager) DeleteSession(sessionID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	delete(sm.sessions, sessionID)
-}
-
-// cleanupExpiredSessions removes expired sessions
-func (sm *SessionManager) cleanupExpiredSessions() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		sm.mu.Lock()
-		now := time.Now()
-
-		for sessionID, session := range sm.sessions {
-			if session.ExpiresAt.Before(now) {
-				delete(sm.sessions, sessionID)
-			}
-		}
-		sm.mu.Unlock()
-	}
-}
-
-// generateSessionID generates a random session ID
-func (sm *SessionManager) generateSessionID() string {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		logger.Error("Failed to generate session ID", "err", err)
-		return ""
-	}
-	return hex.EncodeToString(bytes)
-}
-
 // WebServer represents the Gateway web server
 type WebServer struct {
-	rateLimiter *ratelimit.RateLimiter
-	addr        string
-	staticDir   string
-	server      *http.Server
+	addr      string
+	staticDir string
+	server    *http.Server
 
 	// Authentication
 	authEnabled    bool
 	authUsername   string
 	authPassword   string
-	sessionManager *SessionManager
+	sessionManager *session.Manager
+
+	// Credential Manager for SaaS API
+	credentialManager *credential.Manager
 }
 
 // NewGatewayWebServer creates a new Gateway web server
-func NewGatewayWebServer(addr, staticDir string, rateLimiter *ratelimit.RateLimiter) *WebServer {
+func NewGatewayWebServer(addr, staticDir string) *WebServer {
 	return &WebServer{
 		addr:           addr,
 		staticDir:      staticDir,
-		rateLimiter:    rateLimiter,
-		sessionManager: NewSessionManager(24 * time.Hour), // 24 hour sessions
+		sessionManager: session.NewManager(24 * time.Hour), // 24 hour sessions
 	}
 }
 
-// SetAuth configures authentication for the web server
+// SetAuth configures authentication for the web server. enabled turns on the
+// console login; username and password also guard the platform API.
 func (gws *WebServer) SetAuth(enabled bool, username, password string) {
 	gws.authEnabled = enabled
 	gws.authUsername = username
 	gws.authPassword = password
 }
 
+// SetCredentialManager sets the credential manager for SaaS APIs
+func (gws *WebServer) SetCredentialManager(cm *credential.Manager) {
+	gws.credentialManager = cm
+}
+
 // Start starts the web server
 func (gws *WebServer) Start() error {
 	mux := http.NewServeMux()
 
-	// Static files (with auth protection if enabled)
-	staticHandler := http.FileServer(http.Dir(gws.getStaticDir()))
-	if gws.authEnabled {
-		mux.Handle("/", gws.authMiddleware(staticHandler))
-	} else {
-		mux.Handle("/", staticHandler)
-	}
+	// IMPORTANT: Register API routes BEFORE the catch-all "/" route
+	// Go 1.22+ ServeMux matches more specific patterns first, but to ensure
+	// compatibility and clarity, we register specific routes first.
+
+	// SaaS Platform API - Credential Registration with Basic Auth
+	// This endpoint is called by the platform to register credentials before client connects
+	// Registered first to ensure it takes precedence over the "/" catch-all
+	mux.HandleFunc("/api/credentials/register", gws.handleCredentialRegister)
+
+	// TUIC UUID Lookup API - Get the TUIC UUID for a given group_id
+	// This helps users configure their TUIC clients (Clash Meta, sing-box, etc.)
+	mux.HandleFunc("/api/tuic/uuid", gws.handleTUICUUIDLookup)
 
 	// Authentication APIs (always available if auth is enabled)
 	if gws.authEnabled {
@@ -186,6 +89,15 @@ func (gws *WebServer) Start() error {
 	mux.HandleFunc("/api/metrics/global", protectedHandler(gws.handleGlobalMetrics))
 	mux.HandleFunc("/api/metrics/clients", protectedHandler(gws.handleClientMetrics))
 	mux.HandleFunc("/api/metrics/connections", protectedHandler(gws.handleConnectionMetrics))
+
+	// Static files (with auth protection if enabled)
+	// This is the catch-all "/" route, registered LAST
+	staticHandler := http.FileServer(http.Dir(gws.getStaticDir()))
+	if gws.authEnabled {
+		mux.Handle("/", gws.authMiddleware(staticHandler))
+	} else {
+		mux.Handle("/", staticHandler)
+	}
 
 	// Core APIs only - removed unnecessary rate limiting and stats APIs
 
@@ -261,6 +173,7 @@ func (gws *WebServer) isPublicPath(path string) bool {
 		"/api/auth/login",
 		"/api/auth/logout",
 		"/api/auth/check",
+		"/api/credentials/register", // SaaS API uses Basic Auth, not session
 	}
 
 	for _, publicPath := range publicPaths {
@@ -315,8 +228,10 @@ func (gws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate credentials
-	if loginReq.Username != gws.authUsername || loginReq.Password != gws.authPassword {
+	// Validate credentials in constant time; compare both, so the time does not show which one is wrong
+	userOK := subtle.ConstantTimeCompare([]byte(loginReq.Username), []byte(gws.authUsername)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(loginReq.Password), []byte(gws.authPassword)) == 1
+	if !userOK || !passOK {
 		logger.Warn("Failed login attempt", "username", loginReq.Username, "remote_addr", r.RemoteAddr)
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
@@ -326,7 +241,7 @@ func (gws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	session := gws.sessionManager.CreateSession(loginReq.Username)
 
 	// Set session cookie
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // the web UI serves plain HTTP, so the cookie cannot be Secure
 		Name:     "gateway_session_id",
 		Value:    session.ID,
 		Path:     "/",
@@ -361,7 +276,7 @@ func (gws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear session cookie
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // the web UI serves plain HTTP, so the cookie cannot be Secure
 		Name:     "gateway_session_id",
 		Value:    "",
 		Path:     "/",
@@ -591,6 +506,189 @@ func (gws *WebServer) handleConnectionMetrics(w http.ResponseWriter, r *http.Req
 // Removed unnecessary rate limiting and stats handlers to minimize code
 
 // countActiveDomains was removed (domain metrics not supported in simplified version)
+
+// CredentialRegisterRequest represents the request body for credential registration
+// Platform only registers transport layer auth (client_id + client_key)
+// Proxy auth (group_id + group_password) is registered by tunnel client when connecting
+type CredentialRegisterRequest struct {
+	ClientID      string `json:"client_id"`       // Required: unique client identifier
+	ClientKey     string `json:"client_key"`      // Required: transport layer auth key
+	BandwidthMbps int    `json:"bandwidth_mbps"`  // Optional: stored, not enforced yet
+}
+
+// CredentialRegisterResponse represents the response for credential registration
+type CredentialRegisterResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+// handleCredentialRegister handles POST /api/credentials/register
+// Platform registers transport layer auth (client_id + client_key)
+// Proxy auth (group_id + group_password) is registered by tunnel client when connecting
+func (gws *WebServer) handleCredentialRegister(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("Received credential register request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+
+	// Only allow POST method
+	if r.Method != methodPOST {
+		logger.Warn("Invalid method for credential register", "method", r.Method, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Validate Basic Auth using gateway's auth credentials
+	if !gws.validateBasicAuth(r) {
+		logger.Warn("Basic auth failed for credential register", "remote_addr", r.RemoteAddr, "has_auth_header", r.Header.Get("Authorization") != "")
+		w.Header().Set("WWW-Authenticate", `Basic realm="AnyProxy Gateway"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		gws.respondJSON(w, CredentialRegisterResponse{
+			Success: false,
+			Message: "Unauthorized",
+		})
+		return
+	}
+
+	// Parse request body
+	var req CredentialRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logger.Error("Failed to decode credential register request", "err", err)
+		gws.respondJSON(w, CredentialRegisterResponse{
+			Success: false,
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	// Validate required fields - only client_id and client_key are required
+	if req.ClientID == "" || req.ClientKey == "" {
+		gws.respondJSON(w, CredentialRegisterResponse{
+			Success: false,
+			Message: "client_id and client_key are required",
+		})
+		return
+	}
+
+	if gws.credentialManager == nil {
+		logger.Error("Credential manager not configured")
+		gws.respondJSON(w, CredentialRegisterResponse{
+			Success: false,
+			Message: "Feature not available",
+		})
+		return
+	}
+
+	// Register transport layer client credential only
+	// Note: group_id/group_password will be registered when tunnel client connects
+	cred := &credential.ClientCredential{
+		ClientID:      req.ClientID,
+		ClientKey:     req.ClientKey,
+		BandwidthMbps: req.BandwidthMbps,
+		// GroupID and GroupPassword are empty - will be set by tunnel client
+	}
+
+	if err := gws.credentialManager.RegisterClientTransport(cred); err != nil {
+		logger.Error("Failed to register client transport credential", "client_id", req.ClientID, "err", err)
+		gws.respondJSON(w, CredentialRegisterResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	logger.Info("Client transport credential registered via API", "client_id", req.ClientID, "bandwidth_mbps", req.BandwidthMbps)
+
+	gws.respondJSON(w, CredentialRegisterResponse{
+		Success: true,
+		Message: "Transport credential registered successfully",
+	})
+}
+
+// TUICUUIDRequest request for TUIC UUID lookup
+type TUICUUIDRequest struct {
+	GroupID string `json:"group_id"`
+}
+
+// TUICUUIDResponse response for TUIC UUID lookup
+type TUICUUIDResponse struct {
+	GroupID  string `json:"group_id"`
+	UUID     string `json:"uuid"`
+	Message  string `json:"message,omitempty"`
+	Example  string `json:"example,omitempty"`
+	Success  bool   `json:"success"`
+}
+
+// handleTUICUUIDLookup handles TUIC UUID lookup requests
+// GET /api/tuic/uuid?group_id=xxx or POST /api/tuic/uuid with JSON body
+func (gws *WebServer) handleTUICUUIDLookup(w http.ResponseWriter, r *http.Request) {
+	var groupID string
+
+	switch r.Method {
+	case methodGET:
+		// GET request: get group_id from query parameter
+		groupID = r.URL.Query().Get("group_id")
+	case methodPOST:
+		// POST request: get group_id from JSON body
+		var req TUICUUIDRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			gws.respondJSON(w, TUICUUIDResponse{
+				Success: false,
+				Message: "Invalid request body",
+			})
+			return
+		}
+		groupID = req.GroupID
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if groupID == "" {
+		gws.respondJSON(w, TUICUUIDResponse{
+			Success: false,
+			Message: "group_id is required",
+		})
+		return
+	}
+
+	// Generate UUID using the shared utility function
+	_, uuidStr := utils.GroupIDToTUICUUID(groupID)
+
+	// Build example Clash Meta config snippet
+	example := `proxies:
+  - name: "anyproxy-tuic"
+    type: tuic
+    server: your-server
+    port: 443
+    uuid: "` + uuidStr + `"
+    password: "your-group-password"
+    alpn: [h3]`
+
+	gws.respondJSON(w, TUICUUIDResponse{
+		Success: true,
+		GroupID: groupID,
+		UUID:    uuidStr,
+		Message: "Use this UUID in your TUIC client configuration",
+		Example: example,
+	})
+
+	logger.Debug("TUIC UUID lookup", "group_id", groupID, "uuid", uuidStr)
+}
+
+// validateBasicAuth validates Basic Authentication using gateway's auth credentials.
+// It fails when no credentials are configured, so the platform API is never open.
+func (gws *WebServer) validateBasicAuth(r *http.Request) bool {
+	if gws.authUsername == "" || gws.authPassword == "" {
+		return false
+	}
+
+	username, password, ok := r.BasicAuth()
+	if !ok {
+		return false
+	}
+
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(gws.authUsername)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(gws.authPassword)) == 1
+	return userOK && passOK
+}
 
 // respondJSON returns JSON response
 func (gws *WebServer) respondJSON(w http.ResponseWriter, data interface{}) {

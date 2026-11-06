@@ -11,6 +11,8 @@ const (
 	MsgTypePortForwardReq  = "port_forward_request"
 	MsgTypePortForwardResp = "port_forward_response"
 	MsgTypeError           = "error"
+	MsgTypeHeartbeat       = "heartbeat"     // 🆕 Heartbeat message (client -> gateway)
+	MsgTypeHeartbeatAck    = "heartbeat_ack" // 🆕 Heartbeat acknowledgment (gateway -> client)
 )
 
 // Protocol constants
@@ -47,8 +49,11 @@ var (
 	// DefaultShutdownTimeout default shutdown timeout
 	DefaultShutdownTimeout = 3 * time.Second
 
-	// DefaultMessageChannelSize default message channel size
-	DefaultMessageChannelSize = 100
+	// P-005: Message channel size for proxy connections
+	// 🔧 GAMING OPTIMIZATION: Tuned for balance between latency and throughput
+	// 2000 messages * ~1200 bytes ≈ 2.4MB buffer, ~200ms max latency at 100Mbps
+	// Smaller than before (10000) to reduce bufferbloat while handling traffic bursts
+	DefaultMessageChannelSize = 2000
 
 	// DefaultBufferSize default buffer size
 	DefaultBufferSize = 32 * 1024 // 32KB

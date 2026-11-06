@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -314,16 +315,16 @@ func TestConnect(t *testing.T) {
 			}
 
 			// Simulate responses if connection successful
-			if err == nil && client.conn != nil && len(tt.simulateResponses) > 0 {
-				mockConn := client.conn.(*mockConnectionForTest)
+			if state := client.getConnState(); err == nil && state != nil && state.conn != nil && len(tt.simulateResponses) > 0 {
+				mockConn := state.conn.(*mockConnectionForTest)
 				for _, resp := range tt.simulateResponses {
 					mockConn.simulateMessage(resp)
 				}
 			}
 
 			// Cleanup
-			if client.conn != nil {
-				client.conn.Close()
+			if state := client.getConnState(); state != nil && state.conn != nil {
+				state.conn.Close()
 			}
 		})
 	}
@@ -499,7 +500,7 @@ func TestHandleConnection(t *testing.T) {
 			}
 
 			// Set up transport connection
-			client.conn = mockConn
+			client.setConnState(&connState{conn: mockConn})
 
 			// Create message channel
 			msgChan := client.connMgr.CreateMessageChannel(tt.connID, protocol.DefaultMessageChannelSize)
@@ -571,7 +572,7 @@ func TestCleanupConnection(t *testing.T) {
 	client.connMgr.CreateMessageChannel(connID, protocol.DefaultMessageChannelSize)
 
 	// Add connection metrics
-	monitoring.IncrementActiveConnections()
+	atomic.AddInt64(&monitoring.GetMetrics().ActiveConnections, 1)
 
 	// Cleanup connection
 	client.cleanupConnection(connID)
@@ -643,5 +644,75 @@ func TestConnectionConcurrency(t *testing.T) {
 
 	if client.connMgr.GetMessageChannelCount() != 0 {
 		t.Errorf("Expected 0 message channels after concurrent cleanup, got %d", client.connMgr.GetMessageChannelCount())
+	}
+}
+
+// rejectingTransport dials connections that the gateway rejects at once:
+// one error message, then EOF.
+type rejectingTransport struct {
+	mockTransportForConn
+	dialMu sync.Mutex
+	dials  []time.Time
+}
+
+func (r *rejectingTransport) DialWithConfig(addr string, config *transport.ClientConfig) (transport.Connection, error) {
+	r.dialMu.Lock()
+	r.dials = append(r.dials, time.Now())
+	r.dialMu.Unlock()
+	return &rejectedConn{mockConnectionForTest: mockConnectionForTest{msgChan: make(chan map[string]interface{}, 1)}}, nil
+}
+
+type rejectedConn struct {
+	mockConnectionForTest
+	reads atomic.Int32
+}
+
+func (r *rejectedConn) ReadMessage() ([]byte, error) {
+	if r.reads.Add(1) == 1 {
+		return protocol.PackErrorMessage("group password mismatch"), nil
+	}
+	return nil, io.EOF
+}
+
+// A client the gateway rejected used to count as connected and reconnect
+// in a tight loop. It must back off (1s, then 1.5s) and report each
+// rejection as a failed attempt.
+func TestConnectionLoop_GatewayRejectionBacksOff(t *testing.T) {
+	tr := &rejectingTransport{}
+	transport.RegisterTransportCreator("test-reject", func(*transport.AuthConfig) transport.Transport { return tr })
+	client, err := NewClient(&config.ClientConfig{
+		ClientID: "c", GroupID: "g", GroupPassword: "wrong",
+		Gateway: config.ClientGatewayConfig{Addr: "localhost:1"},
+	}, "test-reject", 0)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	var failures atomic.Int32
+	client.SetConnectionStateCallback(func(s ConnectionState, err error) {
+		if s == ConnectionStateDisconnected && err != nil {
+			failures.Add(1)
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.connectionLoop()
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	client.cancel()
+	<-done
+
+	tr.dialMu.Lock()
+	dials := tr.dials
+	tr.dialMu.Unlock()
+	if len(dials) != 2 {
+		t.Fatalf("expected 2 dials in 1.5s (1s backoff), got %d", len(dials))
+	}
+	if gap := dials[1].Sub(dials[0]); gap < 900*time.Millisecond {
+		t.Fatalf("second dial after %v, expected about 1s of backoff", gap)
+	}
+	if got := failures.Load(); got != 2 {
+		t.Fatalf("expected 2 reported failures, got %d", got)
 	}
 }

@@ -1,25 +1,38 @@
-// Package logger provides structured logging functionality for AnyProxy.
-// It supports multiple output formats (text, JSON) and destinations (stdout, stderr, file)
-// with log rotation capabilities using lumberjack.
+// Package logger provides high-performance structured logging functionality for AnyProxy.
+// It uses uber-go/zap for optimal performance and supports multiple output formats
+// (text, JSON) and destinations (stdout, stderr, file) with log rotation capabilities.
 package logger
 
 import (
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/buhuipao/anyproxy/pkg/config"
 )
 
-var defaultLogger *slog.Logger
+var (
+	// defaultLogger is the global zap sugared logger
+	defaultLogger *zap.SugaredLogger
+	// rawLogger is the underlying zap.Logger for advanced use
+	rawLogger *zap.Logger
+	// logCloser keeps track of the writer that needs to be closed
+	logCloser *lumberjack.Logger
+	// mu protects logger initialization
+	mu sync.RWMutex
+)
 
 // Init initializes the global logger based on configuration
 func Init(cfg *config.LogConfig) error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Set default values if not provided
 	if cfg.Level == "" {
 		cfg.Level = "info"
@@ -38,12 +51,12 @@ func Init(cfg *config.LogConfig) error {
 	}
 
 	// Create output writer
-	var writer io.Writer
+	var writeSyncer zapcore.WriteSyncer
 	switch strings.ToLower(cfg.Output) {
 	case "stdout":
-		writer = os.Stdout
+		writeSyncer = zapcore.AddSync(os.Stdout)
 	case "stderr":
-		writer = os.Stderr
+		writeSyncer = zapcore.AddSync(os.Stderr)
 	case "file":
 		if cfg.File == "" {
 			return fmt.Errorf("log file path is required when output is 'file'")
@@ -70,13 +83,15 @@ func Init(cfg *config.LogConfig) error {
 		}
 
 		// Use lumberjack for log rotation
-		writer = &lumberjack.Logger{
+		lj := &lumberjack.Logger{
 			Filename:   cfg.File,
 			MaxSize:    maxSize,
 			MaxBackups: maxBackups,
 			MaxAge:     maxAge,
 			Compress:   cfg.Compress,
 		}
+		writeSyncer = zapcore.AddSync(lj)
+		logCloser = lj
 	default:
 		// Treat as file path
 		if err := os.MkdirAll(filepath.Dir(cfg.Output), 0750); err != nil {
@@ -87,77 +102,179 @@ func Init(cfg *config.LogConfig) error {
 		if err != nil {
 			return fmt.Errorf("failed to open log file %s: %v", cfg.Output, err)
 		}
-		writer = file
+		writeSyncer = zapcore.AddSync(file)
 	}
 
-	// Create handler based on format
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{
-		Level: level,
+	// Create encoder config
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "", // Disable caller for performance (can enable if needed)
+		FunctionKey:    zapcore.OmitKey,
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.LowercaseLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}
 
+	// Create encoder based on format
+	var encoder zapcore.Encoder
 	switch strings.ToLower(cfg.Format) {
 	case "json":
-		handler = slog.NewJSONHandler(writer, opts)
+		encoder = zapcore.NewJSONEncoder(encoderConfig)
 	case "text":
-		handler = slog.NewTextHandler(writer, opts)
+		// Use console encoder for text format (human-readable)
+		encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+		encoderConfig.ConsoleSeparator = " "
+		encoder = zapcore.NewConsoleEncoder(encoderConfig)
 	default:
 		return fmt.Errorf("unsupported log format: %s", cfg.Format)
 	}
 
-	// Create and set the default logger
-	defaultLogger = slog.New(handler)
-	slog.SetDefault(defaultLogger)
+	// Create core
+	core := zapcore.NewCore(encoder, writeSyncer, level)
+
+	// Create logger with options
+	rawLogger = zap.New(core,
+		zap.AddStacktrace(zapcore.ErrorLevel), // Add stacktrace for errors
+	)
+	defaultLogger = rawLogger.Sugar()
 
 	return nil
 }
 
-// parseLevel converts string level to slog.Level
-func parseLevel(level string) (slog.Level, error) {
+// Close closes the log writer to ensure all buffered logs are flushed.
+// Should be called before program exit.
+func Close() error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Sync the logger to flush any buffered logs
+	if rawLogger != nil {
+		_ = rawLogger.Sync() // Ignore sync errors (common on stdout/stderr)
+	}
+
+	if logCloser != nil {
+		err := logCloser.Close()
+		logCloser = nil
+		return err
+	}
+	return nil
+}
+
+// parseLevel converts string level to zapcore.Level
+func parseLevel(level string) (zapcore.Level, error) {
 	switch strings.ToLower(level) {
 	case "debug":
-		return slog.LevelDebug, nil
+		return zapcore.DebugLevel, nil
 	case "info":
-		return slog.LevelInfo, nil
+		return zapcore.InfoLevel, nil
 	case "warn", "warning":
-		return slog.LevelWarn, nil
+		return zapcore.WarnLevel, nil
 	case "error":
-		return slog.LevelError, nil
+		return zapcore.ErrorLevel, nil
+	case "fatal":
+		return zapcore.FatalLevel, nil
 	default:
-		return slog.LevelInfo, fmt.Errorf("unknown level: %s", level)
+		return zapcore.InfoLevel, fmt.Errorf("unknown level: %s", level)
 	}
 }
 
-// GetLogger returns the default logger
-func GetLogger() *slog.Logger {
-	if defaultLogger == nil {
+// getLogger returns the default sugared logger, creating a default one if needed
+func getLogger() *zap.SugaredLogger {
+	mu.RLock()
+	l := defaultLogger
+	mu.RUnlock()
+
+	if l == nil {
 		// Return a default logger if not initialized
-		return slog.Default()
+		// This is a fallback for code that logs before Init() is called
+		logger, _ := zap.NewProduction()
+		return logger.Sugar()
 	}
-	return defaultLogger
+	return l
 }
 
-// Debug logs a debug message
+// GetLogger returns the underlying zap.Logger for advanced use
+// Note: This returns the raw logger, not the sugared version
+func GetLogger() *zap.Logger {
+	mu.RLock()
+	l := rawLogger
+	mu.RUnlock()
+
+	if l == nil {
+		logger, _ := zap.NewProduction()
+		return logger
+	}
+	return l
+}
+
+// GetSugaredLogger returns the sugared logger for key-value style logging
+func GetSugaredLogger() *zap.SugaredLogger {
+	return getLogger()
+}
+
+// Debug logs a debug message with key-value pairs
+// Example: logger.Debug("message", "key1", value1, "key2", value2)
 func Debug(msg string, args ...any) {
-	GetLogger().Debug(msg, args...)
+	getLogger().Debugw(msg, args...)
 }
 
-// Info logs an info message
+// Info logs an info message with key-value pairs
+// Example: logger.Info("message", "key1", value1, "key2", value2)
 func Info(msg string, args ...any) {
-	GetLogger().Info(msg, args...)
+	getLogger().Infow(msg, args...)
 }
 
-// Warn logs a warning message
+// Warn logs a warning message with key-value pairs
+// Example: logger.Warn("message", "key1", value1, "key2", value2)
 func Warn(msg string, args ...any) {
-	GetLogger().Warn(msg, args...)
+	getLogger().Warnw(msg, args...)
 }
 
-// Error logs an error message
+// Error logs an error message with key-value pairs
+// Example: logger.Error("message", "key1", value1, "key2", value2)
 func Error(msg string, args ...any) {
-	GetLogger().Error(msg, args...)
+	getLogger().Errorw(msg, args...)
 }
 
-// With returns a logger with the given attributes
-func With(args ...any) *slog.Logger {
-	return GetLogger().With(args...)
+// Fatal logs a fatal message with key-value pairs and then calls os.Exit(1)
+// Example: logger.Fatal("message", "key1", value1, "key2", value2)
+func Fatal(msg string, args ...any) {
+	getLogger().Fatalw(msg, args...)
 }
+
+// With returns a logger with the given key-value pairs attached
+// Returns a new SugaredLogger that includes the specified fields
+func With(args ...any) *zap.SugaredLogger {
+	return getLogger().With(args...)
+}
+
+// Named returns a logger with the given name as a prefix
+func Named(name string) *zap.SugaredLogger {
+	return getLogger().Named(name)
+}
+
+// Sync flushes any buffered log entries
+// Applications should call Sync before exiting
+func Sync() error {
+	if rawLogger != nil {
+		return rawLogger.Sync()
+	}
+	return nil
+}
+
+// =============================================================================
+// Additional helper functions for common logging patterns
+// =============================================================================
+
+// DebugEnabled returns true if debug level is enabled
+func DebugEnabled() bool {
+	logger := GetLogger()
+	return logger.Core().Enabled(zapcore.DebugLevel)
+}
+

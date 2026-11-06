@@ -1,0 +1,16 @@
+log:
+  level: debug
+  output: stdout
+client:
+  id: "test-client"
+  gateway:
+    addr: "127.0.0.1:18443"
+    transport_type: "quic"
+    tls_cert: "certs/server.crt"
+    auth_username: "gateway_user"
+    auth_password: "gateway_password"
+  group_id: "test-group"
+  group_password: "test-password"
+  replicas: 1
+  allowed_hosts:
+    - ".*"

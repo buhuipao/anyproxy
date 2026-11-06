@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"golang.org/x/time/rate"
+
+	"github.com/buhuipao/anyproxy/pkg/common/buffer"
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
 	"github.com/buhuipao/anyproxy/pkg/common/credential"
-	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
+	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -27,8 +31,8 @@ import (
 
 // GroupInfo holds information about a group
 type GroupInfo struct {
-	Clients []string // Ordered list of client IDs for round-robin
-	Counter int      // Round-robin counter
+	Clients []string     // Ordered list of client IDs for round-robin
+	Counter atomic.Int64 // P-001: Atomic counter for lock-free round-robin
 }
 
 // Gateway represents the proxy gateway server
@@ -107,10 +111,11 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 		return nil, fmt.Errorf("failed to create credential manager: %v", err)
 	}
 
-	// 🆕 Create transport layer - the only new logic
+	// 🆕 Create transport layer with dynamic client auth support
 	transportImpl := transport.CreateTransport(transportType, &transport.AuthConfig{
-		Username: cfg.Gateway.AuthUsername,
-		Password: cfg.Gateway.AuthPassword,
+		Username:        cfg.Gateway.AuthUsername,
+		Password:        cfg.Gateway.AuthPassword,
+		ClientValidator: credentialMgr.ValidateClient, // Enable dynamic client authentication
 	})
 	if transportImpl == nil {
 		cancel()
@@ -178,17 +183,24 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 		logger.Info("SOCKS5 proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.SOCKS5.ListenAddr)
 	}
 
-	// Create TUIC proxy
+	// Create TUIC v5 proxy (standard-compliant, compatible with Clash Meta/sing-box)
 	if cfg.Gateway.Proxy.TUIC.ListenAddr != "" {
-		logger.Info("Configuring TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr)
-		tuicProxy, err := protocols.NewTUICProxyWithAuth(&cfg.Gateway.Proxy.TUIC, dialFn, gateway.credentialMgr.ValidateGroup, cfg.Gateway.TLSCert, cfg.Gateway.TLSKey)
+		logger.Info("Configuring TUIC v5 proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr)
+		tuicProxy, err := protocols.NewTUICv5ProxyWithAuth(&cfg.Gateway.Proxy.TUIC, dialFn, gateway.credentialMgr.ValidateGroup, cfg.Gateway.TLSCert, cfg.Gateway.TLSKey)
 		if err != nil {
 			cancel()
-			logger.Error("Failed to create TUIC proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "err", err)
-			return nil, fmt.Errorf("failed to create TUIC proxy: %v", err)
+			logger.Error("Failed to create TUIC v5 proxy", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "err", err)
+			return nil, fmt.Errorf("failed to create TUIC v5 proxy: %v", err)
 		}
+
+		// Register TUIC proxy as credential observer for dynamic user sync
+		if tuicObserver, ok := tuicProxy.(protocols.TUICCredentialObserver); ok {
+			credentialMgr.RegisterObserver(tuicObserver)
+			logger.Debug("TUIC proxy registered as credential observer")
+		}
+
 		proxies = append(proxies, tuicProxy)
-		logger.Info("TUIC proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "using_gateway_tls", true)
+		logger.Info("TUIC v5 proxy configured successfully", "listen_addr", cfg.Gateway.Proxy.TUIC.ListenAddr, "using_gateway_tls", true)
 	}
 
 	// Ensure at least one proxy is configured
@@ -202,6 +214,11 @@ func NewGateway(cfg *config.Config, transportType string) (*Gateway, error) {
 	logger.Info("Gateway created successfully", "proxy_count", len(proxies), "listen_addr", cfg.Gateway.ListenAddr)
 
 	return gateway, nil
+}
+
+// GetCredentialManager returns the credential manager instance
+func (g *Gateway) GetCredentialManager() *credential.Manager {
+	return g.credentialMgr
 }
 
 // Start starts the gateway
@@ -265,6 +282,16 @@ func (g *Gateway) Start() error {
 			}
 			return fmt.Errorf("failed to start proxy %d: %v", i, err)
 		}
+
+		// Initialize TUIC proxy with existing credentials after it starts
+		if tuicInit, ok := proxy.(protocols.TUICUserInitializer); ok {
+			existingUsers := g.credentialMgr.GetAllGroups()
+			if len(existingUsers) > 0 {
+				tuicInit.InitializeUsers(existingUsers)
+				logger.Debug("Initialized TUIC with existing credentials", "count", len(existingUsers))
+			}
+		}
+
 		logger.Debug("Proxy server started successfully", "index", i, "type", fmt.Sprintf("%T", proxy))
 	}
 
@@ -363,37 +390,6 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 
 	logger.Info("Client connected", "client_id", clientID, "group_id", groupID, "remote_addr", conn.RemoteAddr())
 
-	// Only register group credentials if password is provided
-	// For file/db credential storage, passwords are pre-configured
-	if password != "" {
-		if err := g.credentialMgr.RegisterGroup(groupID, password); err != nil {
-			logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
-			// Send the error message to the client using proper error message type
-			msgHandler := message.NewGatewayExtendedMessageHandler(conn)
-			if writeErr := msgHandler.WriteErrorMessage(err.Error()); writeErr != nil {
-				logger.Error("Failed to send error message to client", "client_id", clientID, "group_id", groupID, "original_error", err, "write_error", writeErr)
-			} else {
-				logger.Debug("Authentication error message sent to client", "client_id", clientID, "group_id", groupID, "error_message", err.Error())
-			}
-			_ = conn.Close()
-			return
-		}
-		logger.Debug("Registered group credentials from client", "client_id", clientID, "group_id", groupID)
-	} else {
-		logger.Debug("No password provided by client, using pre-configured credentials", "client_id", clientID, "group_id", groupID)
-	}
-
-	// Initialize group info if it doesn't exist
-	g.groupsMu.Lock()
-	if _, exists := g.groups[groupID]; !exists {
-		g.groups[groupID] = &GroupInfo{
-			Clients: make([]string, 0),
-			Counter: 0,
-		}
-		logger.Debug("Initialized group info", "group_id", groupID)
-	}
-	g.groupsMu.Unlock()
-
 	// Create client connection context
 	ctx, cancel := context.WithCancel(g.ctx)
 
@@ -409,16 +405,45 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 		portForwardMgr: g.portForwardMgr,
 	}
 
-	// 🆕 Initialize message handler
-	client.msgHandler = message.NewGatewayExtendedMessageHandler(conn)
+	// 🆕 Initialize SmartWriter for unified zero-copy writes
+	client.smartWriter = buffer.NewSmartWriter(conn, clientID)
 
-	g.addClient(client)
+	// Initialize bandwidth limiter if group has a limit configured
+	if bwLimit := g.credentialMgr.GetBandwidthLimit(groupID); bwLimit > 0 {
+		// bwLimit is bytes/sec; burst allows short spikes up to 2x the rate for 1 second
+		client.bandwidthLimiter = rate.NewLimiter(rate.Limit(bwLimit), int(bwLimit*2))
+		logger.Info("Bandwidth limit applied", "client_id", clientID, "group_id", groupID, "bytes_per_sec", bwLimit)
+	}
+
+	if err := g.addClient(client, password); err != nil {
+		logger.Error("Failed to register group credentials", "client_id", clientID, "group_id", groupID, "err", err)
+		// Send the error message to the client using proper error message type
+		if writeErr := conn.WriteMessage(protocol.PackErrorMessage(err.Error())); writeErr != nil {
+			logger.Error("Failed to send error message to client", "client_id", clientID, "group_id", groupID, "original_error", err, "write_error", writeErr)
+		} else {
+			logger.Debug("Authentication error message sent to client", "client_id", clientID, "group_id", groupID, "error_message", err.Error())
+		}
+		client.Stop()
+		return
+	}
+
+	// 🎮 GAMING: if the transport supports QUIC Datagrams, start a receiver
+	// goroutine. Required to close the client→gateway latency gap for UDP
+	// (Sunshine→Moonlight video path). Without this the reliable stream
+	// was the only path, causing 1600ms+ latency at 4K120.
+	if dr, ok := conn.(transport.DatagramReader); ok {
+		client.wg.Add(1)
+		go func() {
+			defer client.wg.Done()
+			client.handleDatagrams(dr)
+		}()
+	}
 
 	// 🚨 Fix: Handle messages directly, block until connection closes
 	// This ensures BiStream method doesn't return prematurely
 	defer func() {
 		client.Stop()
-		g.removeClient(client.ID)
+		g.removeClient(client)
 		logger.Info("Client disconnected and cleaned up", "client_id", client.ID, "group_id", client.GroupID)
 	}()
 
@@ -426,56 +451,82 @@ func (g *Gateway) handleConnection(conn transport.Connection) {
 	client.handleMessage()
 }
 
-// addClient adds a client to the gateway
-func (g *Gateway) addClient(client *ClientConn) {
-	g.clientsMu.Lock()
-	defer g.clientsMu.Unlock()
-
+// addClient registers the client's group password and adds the client to the
+// gateway. A client that reuses the ID of a connected client replaces it, and
+// the old connection is stopped.
+func (g *Gateway) addClient(client *ClientConn, password string) error {
 	// Validate group ID is non-empty
 	if client.GroupID == "" {
 		logger.Error("Cannot add client with empty group ID", "client_id", client.ID)
-		return
+		return fmt.Errorf("group ID cannot be empty")
 	}
 
-	// Check if client already exists
-	if existingClient, exists := g.clients[client.ID]; exists {
-		logger.Warn("Replacing existing client connection", "client_id", client.ID, "old_group_id", existingClient.GroupID, "new_group_id", client.GroupID)
-		existingClient.Stop()
+	// Check the group password (registering it for a new group). Memory credentials
+	// can be removed by leaveGroupLocked, so check them under clientsMu right before
+	// the join below. File and db credentials are never removed there, so check them
+	// before taking the lock to keep store I/O off the dial path.
+	if g.credentialMgr.IsMemoryStore() {
+		g.clientsMu.Lock()
+		if err := g.credentialMgr.CheckGroupPassword(client.GroupID, password); err != nil {
+			g.clientsMu.Unlock()
+			return err
+		}
+	} else {
+		if err := g.credentialMgr.CheckGroupPassword(client.GroupID, password); err != nil {
+			return err
+		}
+		g.clientsMu.Lock()
 	}
-
+	old := g.clients[client.ID]
 	g.clients[client.ID] = client
 
 	// Add client to group's ordered list
 	g.groupsMu.Lock()
-	// Group should already exist from registerGroupCredentials, but ensure it exists
 	if _, ok := g.groups[client.GroupID]; !ok {
-		logger.Error("Group not found when adding client - this should not happen", "client_id", client.ID, "group_id", client.GroupID)
 		g.groups[client.GroupID] = &GroupInfo{
 			Clients: make([]string, 0),
-			Counter: 0,
+			// Counter is zero-valued by default (atomic.Int64)
 		}
 	}
 
-	// Add client to group's ordered list
-	g.groups[client.GroupID].Clients = append(g.groups[client.GroupID].Clients, client.ID)
+	// A replaced connection in the same group already holds this ID in the list
+	if old == nil || old.GroupID != client.GroupID {
+		if old != nil {
+			g.leaveGroupLocked(old.ID, old.GroupID)
+		}
+		g.groups[client.GroupID].Clients = append(g.groups[client.GroupID].Clients, client.ID)
+	}
 	groupSize := len(g.groups[client.GroupID].Clients)
 	g.groupsMu.Unlock()
+
+	totalClients := len(g.clients)
+	g.clientsMu.Unlock()
+
+	// Stop the replaced connection without holding the locks; stopping can take seconds
+	if old != nil {
+		logger.Warn("Replacing existing client connection", "client_id", client.ID, "old_group_id", old.GroupID, "new_group_id", client.GroupID)
+		// The ports belong to the old connection; the new one opens them again.
+		// Stop it first, so a late port request on it cannot open them after the close.
+		old.Stop()
+		g.portForwardMgr.CloseClientPorts(client.ID)
+	}
 
 	// 🆕 Update client metrics when client connects
 	monitoring.UpdateClientMetrics(client.ID, client.GroupID, 0, 0, false)
 
-	totalClients := len(g.clients)
 	logger.Debug("Client added successfully", "client_id", client.ID, "group_id", client.GroupID, "group_size", groupSize, "total_clients", totalClients)
+	return nil
 }
 
-// removeClient removes a client from the gateway
-func (g *Gateway) removeClient(clientID string) {
+// removeClient removes the given connection from the gateway. It does nothing
+// when the connection was already replaced by a newer one with the same ID.
+func (g *Gateway) removeClient(client *ClientConn) {
 	g.clientsMu.Lock()
 	defer g.clientsMu.Unlock()
 
-	client, exists := g.clients[clientID]
-	if !exists {
-		logger.Debug("Attempted to remove non-existent client", "client_id", clientID)
+	clientID := client.ID
+	if g.clients[clientID] != client {
+		logger.Debug("Client already removed or replaced", "client_id", clientID)
 		return
 	}
 
@@ -490,39 +541,52 @@ func (g *Gateway) removeClient(clientID string) {
 
 	// Remove client from group's ordered list
 	g.groupsMu.Lock()
-	if groupInfo, ok := g.groups[client.GroupID]; ok {
-		for i, id := range groupInfo.Clients {
-			if id == clientID {
-				groupInfo.Clients = append(groupInfo.Clients[:i], groupInfo.Clients[i+1:]...)
-				break
-			}
-		}
-
-		// Clean up empty group
-		if len(groupInfo.Clients) == 0 {
-			delete(g.groups, client.GroupID)
-			// Only remove from credential manager if using memory storage
-			// For file/db storage, credentials are persistent
-			if g.config.Credential == nil || g.config.Credential.Type == "memory" || g.config.Credential.Type == "" {
-				if err := g.credentialMgr.RemoveGroup(client.GroupID); err != nil {
-					logger.Error("Failed to remove group from credential manager", "group_id", client.GroupID, "err", err)
-				}
-				logger.Debug("Removed group credentials from memory", "group_id", client.GroupID)
-			} else {
-				logger.Debug("Keeping persistent group credentials", "group_id", client.GroupID, "storage_type", g.config.Credential.Type)
-			}
-		}
-	}
+	g.leaveGroupLocked(clientID, client.GroupID)
 	g.groupsMu.Unlock()
 
 	remainingClients := len(g.clients)
 	logger.Info("Client removed successfully", "client_id", clientID, "group_id", client.GroupID, "remaining_clients", remainingClients)
 }
 
+// leaveGroupLocked removes clientID from the group's list and deletes the group
+// when it becomes empty. The caller must hold groupsMu.
+func (g *Gateway) leaveGroupLocked(clientID, groupID string) {
+	groupInfo, ok := g.groups[groupID]
+	if !ok {
+		return
+	}
+	for i, id := range groupInfo.Clients {
+		if id == clientID {
+			groupInfo.Clients = append(groupInfo.Clients[:i], groupInfo.Clients[i+1:]...)
+			break
+		}
+	}
+
+	// Clean up empty group. Memory credentials were registered by the clients,
+	// so remove them too (this notifies TUIC to remove the user); a reconnecting
+	// client registers them again. File and db credentials stay, whether they were
+	// pre-configured or registered by a client.
+	if len(groupInfo.Clients) == 0 {
+		delete(g.groups, groupID)
+		if g.credentialMgr.IsMemoryStore() {
+			if err := g.credentialMgr.RemoveGroup(groupID); err != nil {
+				logger.Warn("Failed to remove group credentials", "group_id", groupID, "err", err)
+			} else {
+				logger.Debug("Group became empty, removed credentials", "group_id", groupID)
+			}
+		}
+	}
+}
+
 // getClientByGroup gets client by group
+// F-004 & P-001: Use consistent lock order (clientsMu -> groupsMu) and atomic counter
 func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
-	g.clientsMu.Lock()
-	defer g.clientsMu.Unlock()
+	// F-004: Use consistent lock order: clientsMu -> groupsMu (same as addClient/removeClient)
+	// P-001: Use RLock for read-only operations
+	g.clientsMu.RLock()
+	defer g.clientsMu.RUnlock()
+	g.groupsMu.RLock()
+	defer g.groupsMu.RUnlock()
 
 	groupInfo, exists := g.groups[groupID]
 	if !exists || len(groupInfo.Clients) == 0 {
@@ -530,21 +594,23 @@ func (g *Gateway) getClientByGroup(groupID string) (*ClientConn, error) {
 	}
 
 	clients := groupInfo.Clients
-	counter := groupInfo.Counter
+	numClients := len(clients)
 
-	// Try up to len(clients) times to find a healthy client
-	for i := 0; i < len(clients); i++ {
-		// Calculate current index
-		idx := (counter + i) % len(clients)
+	// P-001: Use atomic counter for lock-free round-robin
+	// Increment counter atomically and get the previous value
+	counter := groupInfo.Counter.Add(1) - 1
+
+	// Try up to numClients times to find a healthy client
+	for i := int64(0); i < int64(numClients); i++ {
+		// Calculate current index using atomic counter
+		idx := int((counter + i) % int64(numClients))
 		clientID := clients[idx]
 
 		if client, exists := g.clients[clientID]; exists {
-			// Update counter to next position
-			groupInfo.Counter = (idx + 1) % len(clients)
-			logger.Info("Round-robin client selection", "group_id", groupID, "selected_client", clientID, "counter_before", counter, "counter_after", groupInfo.Counter, "total_clients", len(clients), "available_clients", clients)
+			logger.Debug("Round-robin client selection", "group_id", groupID, "selected_client", clientID, "counter", counter, "total_clients", numClients)
 			return client, nil
 		}
-		logger.Warn("Client not found in clients map during round-robin", "group_id", groupID, "target_client", clientID, "counter", counter, "idx", idx, "total_clients", len(clients), "available_clients", clients)
+		logger.Warn("Client not found in clients map during round-robin", "group_id", groupID, "target_client", clientID, "counter", counter, "idx", idx, "total_clients", numClients)
 	}
 
 	return nil, fmt.Errorf("no healthy clients available in group: %s", groupID)

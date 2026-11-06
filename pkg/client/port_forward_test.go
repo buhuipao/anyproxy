@@ -76,8 +76,8 @@ func TestSendPortForwardingRequest(t *testing.T) {
 					ClientID:  "test-client",
 					OpenPorts: tt.openPorts,
 				},
-				conn: mockConn,
 			}
+			client.setConnState(&connState{conn: mockConn})
 
 			// Send port forwarding request
 			err := client.sendPortForwardingRequest()

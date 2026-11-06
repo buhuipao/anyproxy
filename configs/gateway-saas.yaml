@@ -1,0 +1,56 @@
+# AnyProxy Gateway Configuration for SaaS Mode
+# This configuration is used when running gateway as part of the tunnel-proxy SaaS platform
+
+log:
+  level: debug          # debug, info, warn, error
+  format: text         # text, json
+  output: stdout       # stdout, stderr, or file path
+  # file: /var/log/anyproxy/gateway.log
+  # max_size: 100      # MB
+  # max_backups: 3
+  # max_age: 7         # days
+  # compress: true
+
+gateway:
+  # Gateway transport server (for anyproxy clients to connect)
+  listen_addr: "0.0.0.0:8443"
+  transport_type: "quic"  # quic, websocket, grpc
+  
+  # TLS configuration (required for QUIC and secure WebSocket)
+  tls_cert: "./certs/server.crt"
+  tls_key: "./certs/server.key"
+  
+  # Gateway transport layer authentication (used by anyproxy clients to connect to gateway)
+  auth_username: "gateway-saas"
+  auth_password: "gateway-saas-password"
+  
+  # Credential storage (for SaaS mode, use memory - Platform manages credentials)
+  credential:
+    type: "memory"  # memory, file, db
+    # For file storage:
+    # type: "file"
+    # file_path: "/var/lib/anyproxy/credentials.json"
+    # For database storage:
+    # type: "db"
+    # db:
+    #   driver: "sqlite"
+    #   data_source: "/var/lib/anyproxy/credentials.db"
+  
+  # Proxy protocols exposed to end users
+  proxy:
+    socks5:
+      listen_addr: "0.0.0.0:1080"
+    http:
+      listen_addr: "0.0.0.0:8080"
+    # tuic:
+    #   listen_addr: "0.0.0.0:8444"
+  
+  # Web management interface (includes SaaS API: /api/credentials/register)
+  web:
+    enabled: true
+    listen_addr: "0.0.0.0:9090"
+    static_dir: "web/gateway/static/"
+    auth_enabled: true
+    auth_username: "gateway-admin"      # HTTP Basic Auth for Platform /api/credentials/register
+    auth_password: "gateway-admin-password"
+    session_key: "change-this-secret-key"

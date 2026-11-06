@@ -1,4 +1,4 @@
-.PHONY: all build clean run-gateway run-client certs test lint docker-build docker-run help
+.PHONY: all build clean run-gateway run-client certs test lint docker-build docker-save docker-run help
 
 # Build variables
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -105,6 +105,7 @@ run-client: build ## Run client
 docker-build: ## Build Docker image
 	@echo "Building Docker image..."
 	@docker build \
+		--platform linux/amd64 \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -112,9 +113,16 @@ docker-build: ## Build Docker image
 		-t anyproxy:latest .
 	@echo "Docker image built: anyproxy:$(VERSION)"
 
+docker-save: docker-build ## Export Docker image as tar.gz
+	@echo "Exporting Docker image to tar.gz..."
+	@mkdir -p build
+	@docker save anyproxy:$(VERSION) | gzip > build/anyproxy-$(VERSION).tar.gz
+	@echo "Image exported: build/anyproxy-$(VERSION).tar.gz"
+
 docker-build-cn: ## Build Docker image with China mirrors (faster in China)
 	@echo "Building Docker image with China mirrors..."
 	@docker build \
+		--platform linux/amd64 \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \

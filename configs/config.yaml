@@ -50,10 +50,17 @@ client:
     tls_cert: "certs/server.crt"
     auth_username: "gateway_user"
     auth_password: "gateway_password"
+  # Dial IPv6 targets too (default false). IPv4 rules do not cover IPv6
+  # addresses, so before turning it on also forbid IPv6 ranges such as
+  # ::1, ::, fe80::/10, fc00::/7 and fd00:ec2::254.
+  allow_ipv6: false
   forbidden_hosts:
     - "0.0.0.0"
     - "192.168.0.0/16"
     - "127.0.0.1"
+    - "::"
+    - "fc00::/7"
+    - "::1"
   allowed_hosts:
     - "example.com"
     - "example.org"

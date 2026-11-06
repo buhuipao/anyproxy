@@ -4,7 +4,6 @@ package monitoring
 
 import (
 	"sync/atomic"
-	"time"
 )
 
 // LogSampler log sampler for reducing high-frequency logs
@@ -34,56 +33,10 @@ func (s *LogSampler) Count() uint64 {
 	return atomic.LoadUint64(&s.counter)
 }
 
-// RateLimiter time-based rate limiter
-type RateLimiter struct {
-	lastLog    int64 // Last log time (nanoseconds)
-	intervalNs int64 // Interval (nanoseconds)
-}
-
-// NewRateLimiter creates a rate limiter
-func NewRateLimiter(interval time.Duration) *RateLimiter {
-	return &RateLimiter{
-		intervalNs: interval.Nanoseconds(),
-	}
-}
-
-// ShouldLog determines whether to record logs
-func (r *RateLimiter) ShouldLog() bool {
-	now := time.Now().UnixNano()
-	last := atomic.LoadInt64(&r.lastLog)
-
-	if now-last < r.intervalNs {
-		return false
-	}
-
-	// Try to update timestamp
-	return atomic.CompareAndSwapInt64(&r.lastLog, last, now)
-}
-
 // Predefined global samplers
-var (
-	dataSampler  = NewLogSampler(1000)         // Data transfer logs: record once every 1000 times
-	connSampler  = NewLogSampler(100)          // Connection logs: record once every 100 times
-	msgSampler   = NewLogSampler(100)          // Message logs: record once every 100 times
-	errorLimiter = NewRateLimiter(time.Second) // Error logs: maximum once per second
-)
+var dataSampler = NewLogSampler(1000) // Data transfer logs: record once every 1000 times
 
 // ShouldLogData determines whether to record data transfer logs
 func ShouldLogData() bool {
 	return dataSampler.ShouldLog()
-}
-
-// ShouldLogConnection determines whether to record connection logs
-func ShouldLogConnection() bool {
-	return connSampler.ShouldLog()
-}
-
-// ShouldLogMessage determines whether to record message logs
-func ShouldLogMessage() bool {
-	return msgSampler.ShouldLog()
-}
-
-// ShouldLogError determines whether to record error logs (rate limited)
-func ShouldLogError() bool {
-	return errorLimiter.ShouldLog()
 }

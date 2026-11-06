@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/logger"
 )
@@ -24,9 +26,15 @@ func (c *Client) sendPortForwardingRequest() error {
 		})
 	}
 
+	// 🚀 Lock-free access to connection
+	state := c.getConnState()
+	if state == nil || state.conn == nil {
+		return fmt.Errorf("connection not established")
+	}
+
 	// Send port forwarding request using binary format
 	binaryMsg := protocol.PackPortForwardMessage(c.getClientID(), ports)
-	return c.conn.WriteMessage(binaryMsg)
+	return state.conn.WriteMessage(binaryMsg)
 }
 
 // handlePortForwardResponse handles port forwarding response
@@ -41,7 +49,7 @@ func (c *Client) handlePortForwardResponse(msg map[string]interface{}) {
 		logger.Info("Port forwarding setup successful", "client_id", c.getClientID())
 	} else {
 		errorMsg, _ := msg["error"].(string)
-		logger.Error("Port forwarding setup failed", "client_id", c.getClientID(), "error", errorMsg)
+		logger.Error("Port forwarding setup failed", "client_id", c.getClientID(), "err", errorMsg)
 	}
 
 	// Log specific port statuses (if available)

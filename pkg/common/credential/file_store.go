@@ -75,8 +75,8 @@ func (fs *FileStore) save(passwords map[string]string) error {
 	return os.Rename(tmpFile, fs.filePath)
 }
 
-// Set stores or updates password hash
-func (fs *FileStore) Set(groupID string, passwordHash string) error {
+// Set stores or updates password (raw, not hashed)
+func (fs *FileStore) Set(groupID string, password string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -85,11 +85,28 @@ func (fs *FileStore) Set(groupID string, passwordHash string) error {
 		return err
 	}
 
-	passwords[groupID] = passwordHash
+	passwords[groupID] = password
 	return fs.save(passwords)
 }
 
-// Get retrieves password hash
+// SetIfAbsent stores the password unless the group already has one, and returns the stored password
+func (fs *FileStore) SetIfAbsent(groupID string, password string) (string, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	passwords, err := fs.load()
+	if err != nil {
+		return "", err
+	}
+
+	if stored, exists := passwords[groupID]; exists {
+		return stored, nil
+	}
+	passwords[groupID] = password
+	return password, fs.save(passwords)
+}
+
+// Get retrieves password
 func (fs *FileStore) Get(groupID string) (string, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -99,11 +116,11 @@ func (fs *FileStore) Get(groupID string) (string, error) {
 		return "", err
 	}
 
-	hash, exists := passwords[groupID]
+	password, exists := passwords[groupID]
 	if !exists {
 		return "", fmt.Errorf("credentials not found for group: %s", groupID)
 	}
-	return hash, nil
+	return password, nil
 }
 
 // Delete removes password
@@ -120,7 +137,7 @@ func (fs *FileStore) Delete(groupID string) error {
 	return fs.save(passwords)
 }
 
-// ValidatePassword checks password validity
+// ValidatePassword checks password validity (direct comparison, no hash)
 func (fs *FileStore) ValidatePassword(groupID string, password string) bool {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -130,10 +147,27 @@ func (fs *FileStore) ValidatePassword(groupID string, password string) bool {
 		return false
 	}
 
-	hash, exists := passwords[groupID]
+	storedPassword, exists := passwords[groupID]
 	if !exists {
 		return false
 	}
 
-	return hash == hashPassword(password)
+	return storedPassword == password
+}
+
+// GetAll returns all stored credentials
+func (fs *FileStore) GetAll() map[string]string {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	passwords, err := fs.load()
+	if err != nil {
+		return make(map[string]string)
+	}
+
+	result := make(map[string]string, len(passwords))
+	for k, v := range passwords {
+		result[k] = v
+	}
+	return result
 }

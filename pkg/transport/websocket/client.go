@@ -19,15 +19,26 @@ func (t *webSocketTransport) dialWebSocketWithConfig(addr string, config *transp
 	logger.Debug("Establishing WebSocket connection to gateway", "client_id", config.ClientID, "gateway_addr", addr)
 
 	// Parse the gateway URL
-	gatewayURL := url.URL{
-		Scheme: "wss",
-		Host:   addr,
-		Path:   "/ws",
+	// Parse address to handle scheme and path correctly
+	var gatewayURL url.URL
+	if parsed, err := url.Parse(addr); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		gatewayURL = *parsed
+	} else {
+		gatewayURL = url.URL{Host: addr}
 	}
 
-	// Detect protocol (supports ws/wss auto-detection)
-	if config.TLSConfig == nil {
-		gatewayURL.Scheme = "ws"
+	// Ensure default path
+	if gatewayURL.Path == "" || gatewayURL.Path == "/" {
+		gatewayURL.Path = "/ws"
+	}
+
+	// Ensure scheme based on TLS config if missing
+	if gatewayURL.Scheme == "" {
+		if config.TLSConfig != nil {
+			gatewayURL.Scheme = "wss"
+		} else {
+			gatewayURL.Scheme = "ws"
+		}
 	}
 
 	logger.Debug("Gateway URL constructed", "client_id", config.ClientID, "url", gatewayURL.String())
@@ -67,7 +78,7 @@ func (t *webSocketTransport) dialWebSocketWithConfig(addr string, config *transp
 	}
 
 	if resp != nil {
-		logger.Debug("WebSocket connection established", "client_id", config.ClientID, "status_code", resp.StatusCode)
+		logger.Info("WebSocket connection established", "client_id", config.ClientID, "status_code", resp.StatusCode)
 	}
 
 	// Create high-performance connection with integrated Writer, pass client information

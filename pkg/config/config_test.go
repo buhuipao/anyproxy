@@ -238,6 +238,31 @@ gateway:
 				},
 			},
 		},
+		{
+			name: "config with socks5 UDP support (same port)",
+			configYAML: `
+gateway:
+  listen_addr: "0.0.0.0:8443"
+  auth_username: "admin"
+  auth_password: "secret"
+  proxy:
+    socks5:
+      listen_addr: "127.0.0.1:1080"
+`,
+			wantErr: false,
+			expectedCfg: &Config{
+				Gateway: GatewayConfig{
+					ListenAddr:   "0.0.0.0:8443",
+					AuthUsername: "admin",
+					AuthPassword: "secret",
+					Proxy: ProxyConfig{
+						SOCKS5: SOCKS5Config{
+							ListenAddr: "127.0.0.1:1080",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -583,15 +608,15 @@ func TestConfig_Validate(t *testing.T) {
 			errMsg:  "client group_id cannot be empty",
 		},
 		{
-			name: "client with empty group password (now allowed)",
+			name: "client with empty group password (config accepts it, gateway rejects it)",
 			config: Config{
 				Client: ClientConfig{
 					ClientID:      "test-client",
 					GroupID:       "test-group",
-					GroupPassword: "", // Optional when using file/db credential storage
+					GroupPassword: "", // The gateway rejects this client at connect time
 				},
 			},
-			wantErr: false, // Password is now optional
+			wantErr: false, // Config validation does not check group_password
 		},
 		{
 			name: "client with both group fields empty (only group_id is required)",

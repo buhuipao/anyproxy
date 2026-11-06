@@ -61,12 +61,12 @@ gateway:
     type: "memory"
 
     # File path for storing credentials (only used when type is "file")
-    # The file will store a simple JSON map of groupID -> passwordHash
+    # The file will store a simple JSON map of groupID -> raw group password (not hashed)
     # file_path: "credentials/groups.json"
 
     # Database configuration (only used when type is "db")
     # db:
-    #   driver: "mysql"  # Database driver: mysql, postgres, sqlite3
+    #   driver: "mysql"  # Database driver: mysql, postgres, sqlite
     #   data_source: "user:password@tcp(localhost:3306)/anyproxy"  # Connection string
     #   table_name: "credentials"  # Optional, defaults to "credentials"
 
@@ -104,7 +104,7 @@ gateway:
 client:
   id: "production-client"          # Base client identifier
   group_id: "prod-env"             # Group ID for routing, also is the proxy authentication username (important!)
-  group_password: "prod_secret"    # Group password for proxy authentication (optional when using file/db credential storage)
+  group_password: "prod_secret"    # Group password for proxy authentication (required; with file/db credential storage it must match the stored password)
   replicas: 3                      # Number of client replicas
   
   # Gateway Connection Settings
@@ -116,15 +116,22 @@ client:
     auth_password: "secure_gateway_password"
   
   # Security: Host Access Control
+  # Forbidden rules always win over allowed_hosts and also apply to open_ports.
+  # CIDR/IP rules are checked against every resolved IP, so a forbidden range
+  # also denies allowed names that resolve into it: forbidding 127.0.0.0/8 or
+  # private ranges here would deny the localhost and internal services below.
+  # allowed_hosts already denies every target it does not list.
+  # allow_ipv6 (default false) also dials IPv6 targets. IPv4 rules do not
+  # cover IPv6 addresses, so the IPv6 entries below are needed when it is on.
+  allow_ipv6: false
   forbidden_hosts:
     - "169.254.0.0/16"            # Cloud metadata services
-    - "127.0.0.0/8"               # Localhost addresses
-    - "10.0.0.0/8"                # Private networks
-    - "172.16.0.0/12"             # Private networks
-    - "192.168.0.0/16"            # Private networks
     - "0.0.0.0"                   # Null address
-    - "::1"                       # IPv6 localhost
-    - "kubernetes.default.svc"    # Kubernetes internal
+    - "fe80::/10"                 # IPv6 link-local
+    - "fd00:ec2::254"             # Cloud metadata over IPv6 (AWS)
+    - "::"                        # IPv6 null address
+    - "kubernetes.default.svc"    # Kubernetes API and its subdomains
+    - "kubernetes.default.svc.cluster.local"  # Same API by its full name
   
   # Security: Allowed Services (explicit whitelist)
   allowed_hosts:
@@ -135,6 +142,7 @@ client:
     - ".*\\.trusted\\.com:.*"     # Trusted domain pattern
     - "localhost:22"              # SSH access
     - "localhost:3000"            # Development server
+    - "localhost:53"              # Local DNS (UDP port forward below)
   
   # Port Forwarding Configuration
   open_ports:
@@ -203,15 +211,13 @@ client:
 #    Gateway: https://gateway.example.com:8090 (admin / admin123)
 #    Client:  http://localhost:8091 (no auth by default)
 
-# Database Driver Installation (for DB credential storage):
-# 
-# SQLite:  go get modernc.org/sqlite (Pure Go, no CGO required)
-# MySQL:   go get github.com/go-sql-driver/mysql  
-# Postgres: go get github.com/lib/pq
+# Database drivers (for DB credential storage):
 #
-# Note: Drivers are only needed if using DB credential storage.
-# The modernc.org/sqlite driver is recommended for SQLite as it's pure Go
-# and doesn't require CGO, making cross-compilation easier.
+# The gateway binary includes a driver for each supported `driver` name.
+# All are pure Go, so no CGO is needed.
+# sqlite:   modernc.org/sqlite
+# mysql:    github.com/go-sql-driver/mysql
+# postgres: github.com/lib/pq
 
 # Transport Protocol Selection Guide:
 #
@@ -236,10 +242,10 @@ client:
 #
 # 3. Password Management:
 #    - Memory storage: Clients must provide group_password, credentials are lost on restart
-#    - File/DB storage: group_password is optional in client config
-#      * Pre-configure credentials in file/database before starting clients
-#      * Clients can connect without password when credentials are already stored
-#      * If client provides password, it will update the stored credential
+#    - File/DB storage: Clients must also provide group_password
+#      * Optionally pre-configure credentials in the file/database; clients must still send the matching group_password
+#      * The client's password must match the stored one, or the client is rejected
+#      * A client without password is always rejected
 #
 # 4. Simple Format: No complex username.group_id format - just group_id and group_password
 
@@ -252,4 +258,3 @@ client:
 # - Use firewall rules to restrict management port access
 # - Keep group_password secure as it's used for proxy authentication 
 # - For production: Use database credential storage for high availability
-# - Install database drivers only from trusted sources when using DB storage 

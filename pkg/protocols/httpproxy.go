@@ -6,14 +6,17 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/connection"
 	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
@@ -151,7 +154,7 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			GroupID:  username,
 		}
 
-		logger.Debug("HTTP proxy authentication successful", "username", username, "group_id", username, "client", clientAddr)
+		logger.Info("HTTP proxy authentication successful", "username", username, "group_id", username, "client", clientAddr)
 	} else {
 		logger.Debug("No authentication required")
 	}
@@ -299,11 +302,18 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request, client
 	logger.Debug("Sent CONNECT response to client", "conn_id", connID)
 
 	// Handle any buffered data from the client
+	// 🆕 Use WriteNoCopy when available since bufferedData is newly allocated
 	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
 		bufferedBytes := clientBuf.Reader.Buffered()
 		bufferedData := make([]byte, bufferedBytes)
 		if _, readErr := clientBuf.Read(bufferedData); readErr == nil {
-			if _, writeErr := targetConn.Write(bufferedData); writeErr == nil {
+			var writeErr error
+			if ncw, ok := targetConn.(connection.NoCopyWriter); ok {
+				_, writeErr = ncw.WriteNoCopy(bufferedData)
+			} else {
+				_, writeErr = targetConn.Write(bufferedData)
+			}
+			if writeErr == nil {
 				logger.Debug("Forwarded buffered client data", "conn_id", connID, "bytes", bufferedBytes)
 			}
 		}
@@ -311,8 +321,13 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request, client
 
 	logger.Info("CONNECT tunnel established", "conn_id", connID, "target_host", host)
 
-	// Start bidirectional data transfer
-	go p.transfer(targetConn, clientConn, "target->client", connID)
+	// Start bidirectional data transfer. The tunnel has no half-close, so when
+	// the client side ends, close targetConn to end the other direction too
+	// (RFC 9110 section 9.3.6). The deferred closes cover the reverse case.
+	go func() {
+		p.transfer(targetConn, clientConn, "target->client", connID)
+		_ = targetConn.Close()
+	}()
 	p.transfer(clientConn, targetConn, "client->target", connID)
 
 	logger.Info("CONNECT tunnel closed", "conn_id", connID, "target_host", host)
@@ -350,7 +365,11 @@ func (p *HTTPProxy) transfer(dst, src net.Conn, direction string, connID string)
 
 			_, writeErr := dst.Write(buffer[:n])
 			if writeErr != nil {
-				logger.Error("Transfer write error", "conn_id", connID, "direction", direction, "bytes_written", n, "total_bytes", totalBytes, "err", writeErr)
+				if isClosedConnErr(writeErr) {
+					logger.Debug("Connection closed during transfer", "conn_id", connID, "direction", direction, "total_bytes", totalBytes, "err", writeErr)
+				} else {
+					logger.Error("Transfer write error", "conn_id", connID, "direction", direction, "bytes_written", n, "total_bytes", totalBytes, "err", writeErr)
+				}
 				return
 			}
 		}
@@ -362,9 +381,7 @@ func (p *HTTPProxy) transfer(dst, src net.Conn, direction string, connID string)
 			}
 
 			// Log connection close gracefully
-			if strings.Contains(err.Error(), "use of closed network connection") ||
-				strings.Contains(err.Error(), "connection reset by peer") ||
-				err == io.EOF {
+			if isClosedConnErr(err) {
 				logger.Debug("Connection closed during transfer", "conn_id", connID, "direction", direction, "total_bytes", totalBytes)
 			} else {
 				logger.Error("Transfer read error", "conn_id", connID, "direction", direction, "total_bytes", totalBytes, "err", err)
@@ -372,6 +389,14 @@ func (p *HTTPProxy) transfer(dst, src net.Conn, direction string, connID string)
 			return
 		}
 	}
+}
+
+// isClosedConnErr reports whether err only means that one side of a CONNECT
+// tunnel closed: EOF, the tunnel closed (io.ErrClosedPipe), our own socket
+// closed (net.ErrClosed), or the peer went away (EPIPE, ECONNRESET).
+func isClosedConnErr(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // handleRequest handles normal HTTP requests
@@ -433,11 +458,25 @@ func (p *HTTPProxy) handleRequest(w http.ResponseWriter, r *http.Request, client
 
 	// For HTTPS, wrap with TLS
 	if targetURL.Scheme == protocol.SchemeHTTPS {
-		logger.Debug("Wrapping connection with TLS", "conn_id", connID, "server_name", strings.Split(host, ":")[0])
+		serverName := strings.Split(host, ":")[0]
+		logger.Debug("Wrapping connection with TLS", "conn_id", connID, "server_name", serverName)
 		tlsConn := tls.Client(targetConn, &tls.Config{
-			ServerName: strings.Split(host, ":")[0],
+			ServerName: serverName,
 			MinVersion: tls.VersionTLS12, // Enforce minimum TLS 1.2
 		})
+
+		// F-005: Explicitly perform TLS handshake with context for proper timeout and error handling
+		handshakeCtx, handshakeCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer handshakeCancel()
+
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+			logger.Error("TLS handshake failed", "conn_id", connID, "server_name", serverName, "err", err)
+			http.Error(w, "TLS Handshake Failed", http.StatusBadGateway)
+			return
+		}
+		logger.Debug("TLS handshake completed", "conn_id", connID, "server_name", serverName,
+			"version", tlsConn.ConnectionState().Version, "cipher", tlsConn.ConnectionState().CipherSuite)
+
 		targetConn = tlsConn
 	}
 
@@ -460,6 +499,21 @@ func (p *HTTPProxy) handleRequest(w http.ResponseWriter, r *http.Request, client
 	logger.Debug("Reading response from target server", "conn_id", connID)
 	targetReader := bufio.NewReader(targetConn)
 	response, err := http.ReadResponse(targetReader, r)
+
+	// Forward interim 1xx responses (RFC 9110 section 15.2; never to an
+	// HTTP/1.0 client) and read on to the final response. 101 is final here,
+	// as before.
+	for err == nil && response.StatusCode/100 == 1 && response.StatusCode != http.StatusSwitchingProtocols {
+		if r.ProtoAtLeast(1, 1) {
+			for key, values := range response.Header {
+				w.Header()[key] = values
+			}
+			w.WriteHeader(response.StatusCode)
+			// net/http keeps the header map after a 1xx; start the final one clean.
+			clear(w.Header())
+		}
+		response, err = http.ReadResponse(targetReader, r)
+	}
 
 	if err != nil {
 		logger.Error("Failed to read response from target server", "conn_id", connID, "target_host", host, "err", err)

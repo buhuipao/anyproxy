@@ -3,10 +3,13 @@ package gateway
 import (
 	"context"
 	"net"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/config"
 )
 
@@ -528,4 +531,119 @@ func TestPortForwardManager_ProtocolSpecificOperations(t *testing.T) {
 	// Clean up
 	mgr.CloseClientPorts(client1.ID)
 	mgr.CloseClientPorts(client2.ID)
+}
+
+// TestPortForwardManager_UDPSessionRoundTrip checks that the target's UDP response reaches
+// the external source, and that packets from one source reuse one tunnel connection.
+func TestPortForwardManager_UDPSessionRoundTrip(t *testing.T) {
+	oldTimeout := protocol.DefaultConnectTimeout
+	protocol.SetConnectTimeout(300 * time.Millisecond)
+	t.Cleanup(func() { protocol.SetConnectTimeout(oldTimeout) })
+
+	client, mockConn := createTestClientConn()
+	var connects atomic.Int32
+	// The fake client accepts every connect and echoes every UDP packet back.
+	mockConn.writeMessageFunc = func(data []byte) error {
+		_, msgType, payload, err := protocol.UnpackBinaryHeader(data)
+		if err != nil {
+			return nil
+		}
+		switch msgType {
+		case protocol.BinaryMsgTypeConnect:
+			connects.Add(1)
+			connID, _, _, _ := protocol.UnpackConnectMessage(payload)
+			go client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeConnectResponse, "id": connID, "success": true})
+		case protocol.BinaryMsgTypeUDPData:
+			connID, _, udpData, _ := protocol.UnpackUDPDataMessage(payload)
+			go client.routeMessage(map[string]interface{}{"type": protocol.MsgTypeData, "id": connID, "data": udpData})
+		}
+		return nil
+	}
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	pl := &PortListener{Protocol: protocol.ProtocolUDP, ClientID: client.ID, LocalHost: "127.0.0.1", LocalPort: 9, PacketConn: pc, Client: client, ctx: ctx, cancel: cancel}
+	mgr := NewPortForwardManager()
+	listenerDone := make(chan struct{})
+	go func() {
+		defer close(listenerDone)
+		mgr.handlePortListener(pl)
+	}()
+	defer func() {
+		cancel()
+		<-listenerDone
+		mgr.Stop()
+		client.Stop()
+	}()
+
+	source, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer source.Close()
+
+	roundTrip := func() bool {
+		if _, err := source.WriteTo([]byte("ping"), pc.LocalAddr()); err != nil {
+			t.Fatalf("Failed to send UDP packet: %v", err)
+		}
+		_ = source.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, 64)
+		n, _, err := source.ReadFrom(buf)
+		return err == nil && string(buf[:n]) == "ping"
+	}
+
+	// Retry like a real UDP client: a failed dial ends the session and the next packet starts a new one.
+	ok := false
+	for i := 0; i < 10 && !ok; i++ {
+		ok = roundTrip()
+	}
+	if !ok {
+		t.Fatal("No UDP response reached the source")
+	}
+
+	dials := connects.Load()
+	for i := 0; i < 3; i++ {
+		if !roundTrip() {
+			t.Fatalf("Round trip %d on the open session failed", i)
+		}
+	}
+	if got := connects.Load(); got != dials {
+		t.Errorf("Expected the session to reuse its tunnel connection, got %d new dials", got-dials)
+	}
+}
+
+// TestPortForwardManager_CloseClientPortsFreesPorts checks that ports closed by CloseClientPorts
+// can be opened again at once, as when a client reconnects with the same ID.
+func TestPortForwardManager_CloseClientPortsFreesPorts(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("Failed to find a free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	mgr := NewPortForwardManager()
+	defer mgr.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &ClientConn{ID: "reconnecting-client", GroupID: "test-group", ctx: ctx, cancel: cancel}
+	ports := []config.OpenPort{
+		{RemotePort: port, LocalPort: 22, LocalHost: "localhost", Protocol: "tcp"},
+		{RemotePort: port, LocalPort: 53, LocalHost: "localhost", Protocol: "udp"},
+	}
+
+	// One P keeps the listener goroutines from running between the close and the reopen.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+
+	if err := mgr.OpenPorts(client, ports); err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	mgr.CloseClientPorts(client.ID)
+	if err := mgr.OpenPorts(client, ports); err != nil {
+		t.Fatalf("Reopen after CloseClientPorts failed: %v", err)
+	}
+	mgr.CloseClientPorts(client.ID)
 }

@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/common/connection"
-	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/config"
 )
@@ -77,8 +77,10 @@ func TestRouteMessage(t *testing.T) {
 				"type": protocol.MsgTypeConnect,
 				"id":   "conn-1",
 			},
+			// The processor goroutine started for the new channel may take the
+			// message first, so only the channel is checked here. The data
+			// cases below cover routing into the channel.
 			expectChannelCreated: true,
-			expectMessageRouted:  true,
 		},
 		{
 			name: "route data message to existing channel",
@@ -516,10 +518,8 @@ func TestSendConnectResponse(t *testing.T) {
 				config: &config.ClientConfig{
 					ClientID: "test-client",
 				},
-				conn: mockConn,
 			}
-			// Initialize msgHandler
-			client.msgHandler = message.NewClientExtendedMessageHandler(mockConn)
+			client.setConnState(&connState{conn: mockConn})
 
 			// Send connect response
 			err := client.sendConnectResponse(tt.connID, tt.success, tt.errorMsg)
@@ -645,15 +645,14 @@ func TestErrorMessageIntegration(t *testing.T) {
 				readData: errorMsgData,
 			}
 
-			// Create client with message handler
+			// Create client with connection state
 			client := &Client{
 				config: &config.ClientConfig{
 					ClientID: "test-client",
 				},
-				conn:       mockConn,
-				msgHandler: message.NewClientExtendedMessageHandler(mockConn),
-				ctx:        context.Background(),
+				ctx: context.Background(),
 			}
+			client.setConnState(&connState{conn: mockConn})
 
 			// Read and process the message
 			msg, err := client.readNextMessage()
@@ -684,5 +683,30 @@ func TestErrorMessageIntegration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHandleConnectMessageAllowIPv6 checks that IPv6 targets are resolved
+// only with allow_ipv6; by default the client keeps to IPv4
+func TestHandleConnectMessageAllowIPv6(t *testing.T) {
+	for _, allowIPv6 := range []bool{false, true} {
+		conn := &mockConnForHandler{}
+		client := &Client{config: &config.ClientConfig{ClientID: "test-client", AllowIPv6: allowIPv6}, ctx: context.Background()}
+		client.setConnState(&connState{conn: conn})
+
+		// Port 1 is closed, so with allow_ipv6 the dial fails after the resolve
+		client.handleConnectMessage(map[string]interface{}{"id": "conn-ipv6", "network": "tcp", "address": "[::1]:1"})
+
+		_, _, payload, err := protocol.UnpackBinaryHeader(conn.writeData)
+		if err != nil {
+			t.Fatalf("allow_ipv6=%v: no connect response: %v", allowIPv6, err)
+		}
+		_, success, errorMsg, err := protocol.UnpackConnectResponseMessage(payload)
+		if err != nil || success {
+			t.Fatalf("allow_ipv6=%v: connect response = %v %q %v, want a failure", allowIPv6, success, errorMsg, err)
+		}
+		if resolvedIPv4Only := strings.Contains(errorMsg, "no suitable address"); resolvedIPv4Only == allowIPv6 {
+			t.Errorf("allow_ipv6=%v: connect error %q", allowIPv6, errorMsg)
+		}
 	}
 }

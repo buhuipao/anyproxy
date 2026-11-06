@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -380,6 +381,35 @@ func TestHTTPProxy_HandleConnect_FailedDial(t *testing.T) {
 	}
 }
 
+func TestHTTPProxy_HandleConnect_ClientCloseClosesTunnel(t *testing.T) {
+	tunnel, far := net.Pipe()
+	defer far.Close()
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return tunnel, nil
+	}
+	proxy, _ := NewHTTPProxyWithAuth(&config.HTTPConfig{ListenAddr: "127.0.0.1:0"}, dial, nil)
+
+	// The hijacked client conn has no data, so its first Read returns EOF:
+	// the client has closed.
+	w := &mockHijacker{
+		ResponseWriter: httptest.NewRecorder(),
+		conn:           &mockHijackConn{writeData: &strings.Builder{}},
+	}
+	req := httptest.NewRequest("CONNECT", "idle.example:22", nil)
+
+	done := make(chan struct{})
+	go func() {
+		proxy.(*HTTPProxy).handleConnect(w, req, "127.0.0.1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tunnel stayed open after the client closed")
+	}
+}
+
 func TestHTTPProxy_Transfer(t *testing.T) {
 	// Create two connected pipes
 	client, server := net.Pipe()
@@ -415,6 +445,41 @@ func TestHTTPProxy_Transfer(t *testing.T) {
 
 	// Wait for transfer to complete
 	<-done
+}
+
+func TestHTTPProxy_ExpectContinueRelaysFinalResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		w.Write(append([]byte("created:"), body...))
+	}))
+	defer upstream.Close()
+
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return net.Dial(network, addr)
+	}
+	proxy, _ := NewHTTPProxyWithAuth(&config.HTTPConfig{ListenAddr: "127.0.0.1:0"}, dial, nil)
+	proxyServer := httptest.NewServer(proxy.(*HTTPProxy))
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:                 http.ProxyURL(proxyURL),
+		ExpectContinueTimeout: time.Second,
+		DisableKeepAlives:     true,
+	}}
+	req, _ := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader("hello"))
+	req.Header.Set("Expect", "100-continue")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated || string(body) != "created:hello" {
+		t.Fatalf("got %d %q, want 201 %q", resp.StatusCode, body, "created:hello")
+	}
 }
 
 func TestGetClientIP(t *testing.T) {

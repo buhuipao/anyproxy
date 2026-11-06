@@ -1,0 +1,116 @@
+# TUIC v5 Latency Test Configuration
+# This configuration file provides default settings for the latency test tool
+
+# TUIC Server Configuration
+server:
+  # Server address (host:port)
+  address: "47.107.181.88:9443"
+  
+  # User authentication
+  uuid: "demo-group"
+  password: "demo-123"
+  
+  # UDP relay mode: "native" (QUIC Datagram) or "quic" (QUIC Stream)
+  # native: Lower latency, but may drop packets if > ~1200B
+  # quic: Reliable, but higher latency due to stream ordering
+  udp_relay_mode: "native"
+  
+  # Congestion control: "bbr", "cubic", or "new_reno"
+  congestion: "bbr"
+  
+  # Enable 0-RTT handshake (reduces initial connection latency)
+  zero_rtt: true
+  
+  # TLS settings
+  tls:
+    insecure: true  # Skip certificate verification (for testing)
+    server_name: "" # Override SNI (leave empty to use server address)
+
+# Test Configuration
+test:
+  # Test type: "latency", "throughput", "frameloss", "gamestream", "all"
+  type: "all"
+  
+  # Number of iterations for latency tests
+  count: 20
+  
+  # Duration for streaming tests
+  duration: "10s"
+  
+  # Target FPS for frame loss test (60 for typical gaming)
+  fps: 60
+  
+  # Target bitrate in Mbps for throughput test
+  bitrate: 50
+  
+  # Number of concurrent connections for load test
+  concurrent: 4
+  
+  # Skip direct baseline tests (useful when running on remote server)
+  skip_direct: false
+
+# Local Echo Service Configuration
+local_services:
+  http_port: 19080
+  tcp_port: 19081
+  udp_port: 19053
+
+# Output Configuration
+output:
+  verbose: false
+  
+# Test Scenarios (for reference)
+# These are the typical configurations for different use cases
+
+scenarios:
+  # Sunshine/Moonlight 1080p60 gaming
+  gaming_1080p60:
+    fps: 60
+    bitrate: 20  # ~20 Mbps for 1080p60
+    description: "1080p60 game streaming test"
+
+  # Sunshine/Moonlight 1080p120 gaming
+  gaming_1080p120:
+    fps: 120
+    bitrate: 40  # ~40 Mbps for 1080p120
+    description: "1080p120 high refresh rate gaming"
+    
+  # Sunshine/Moonlight 2K60 gaming
+  gaming_2k60:
+    fps: 60
+    bitrate: 40  # ~40 Mbps for 2K60
+    description: "2K (1440p) 60fps game streaming"
+
+  # Sunshine/Moonlight 2K120 gaming (competitive/high-end)
+  gaming_2k120:
+    fps: 120
+    bitrate: 80  # ~80 Mbps for 2K120 (high quality)
+    duration: "30s"
+    description: "2K (1440p) 120fps competitive gaming - requires stable connection"
+    
+  # Sunshine/Moonlight 4K60 gaming
+  gaming_4k60:
+    fps: 60
+    bitrate: 50  # ~50 Mbps for 4K60
+    description: "4K60 game streaming test"
+
+  # Sunshine/Moonlight 4K120 gaming (ultra high-end)
+  gaming_4k120:
+    fps: 120
+    bitrate: 150  # ~150 Mbps for 4K120
+    duration: "30s"
+    description: "4K120 ultra high-end gaming - requires excellent connection"
+    
+  # High-performance stress test
+  stress_test:
+    fps: 120
+    bitrate: 200
+    duration: "30s"
+    description: "High-performance stress test"
+    
+  # Quick connectivity check
+  quick_test:
+    count: 5
+    duration: "5s"
+    skip_direct: true
+    description: "Quick connectivity verification"

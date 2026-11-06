@@ -85,7 +85,7 @@ Handles UDP packet fragmentation:
 
 #### Connection Management
 - Automatic cleanup of expired clients (5 minutes)
-- UDP session timeout (5 minutes)
+- UDP session idle timeout (`max_idle_timeout`, default 30 seconds)
 - Packet assembler cleanup (2 minutes)
 - Graceful shutdown handling
 

@@ -1,51 +1,15 @@
 # golangci-lint configuration file
 # This file configures golangci-lint for the anyproxy project
 
-version: 2
+version: "2"
 
 run:
   timeout: 5m
   issues-exit-code: 1
   tests: false  # Don't analyze test files at all
 
-output:
-  format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
-
-linters-settings:
-  misspell:
-    locale: US
-  lll:
-    line-length: 140
-  govet:
-    enable:
-      - shadow
-  revive:
-    severity: warning
-    rules:
-      - name: exported
-        severity: warning
-        disabled: false
-      - name: package-comments
-        severity: warning
-        disabled: false
-      - name: unused-parameter
-        severity: warning
-        disabled: false
-  gosec:
-    severity: "low"
-    confidence: "low"
-  errcheck:
-    # Only exclude truly safe functions
-    exclude-functions:
-      - io.Copy
-      - io.WriteString
-  unused:
-    check-exported: false
-
 linters:
-  disable-all: true
+  default: none
   enable:
     # Default enabled linters (always good to have)
     - errcheck       # Check for unchecked errors
@@ -53,41 +17,68 @@ linters:
     - ineffassign    # Detect ineffective assignments
     - staticcheck    # Comprehensive static analysis
     - unused         # Find unused code
-    
+
     # Additional useful linters
     - misspell       # Check for misspelled words
     - revive         # Replacement for golint
     - gosec          # Security-focused linting
-    - goconst        # Find repeated strings that could be constants 
+    - goconst        # Find repeated strings that could be constants
     - unconvert      # Remove unnecessary type conversions
     - unparam        # Find unused function parameters
 
+  settings:
+    misspell:
+      locale: US
+    lll:
+      line-length: 140
+    govet:
+      enable:
+        - shadow
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          severity: warning
+          disabled: false
+        - name: package-comments
+          severity: warning
+          disabled: false
+        - name: unused-parameter
+          severity: warning
+          disabled: false
+    gosec:
+      severity: low
+      confidence: low
+    errcheck:
+      # Only exclude truly safe functions
+      exclude-functions:
+        - io.Copy
+        - io.WriteString
+    goconst:
+      # Message map keys stay literals, like the msg["type"] lookups that read them
+      ignore-string-values:
+        - ^type$
+        - ^data$
+
+  exclusions:
+    generated: lax
+    rules:
+      # Re-declaring err or ok in an inner scope (if err := ...; ok := ...) is
+      # idiomatic Go. Shadow checks still apply to all other names.
+      - linters:
+          - govet
+        text: 'shadow: declaration of "(err|ok)" shadows declaration'
+    paths:
+      - ".*\\.pb\\.go$"
+      - ".*_test\\.go$"  # Skip all test files
+      # v2 matches these against file paths, so anchor the directory names
+      - ^vendor/
+      - ^build/
+      - ^bin/
+      - ^tests/  # Manual load-test tools (go run ./tests/...), not shipped
+
 issues:
-  exclude-use-default: false
-  exclude-dirs:
-    - vendor
-    - build
-    - bin
-  exclude-files:
-    - ".*\\.pb\\.go$"
-    - ".*_test\\.go$"  # Skip all test files
-  uniq-by-line: true
-  exclude-rules:
-    # === ONLY EXCLUDE TEST FILES ===
-    - path: "_test\\.go$"
-      linters:
-        - errcheck
-        - unparam
-        - gosec
-        - unused
-        - goconst
-        - ineffassign
-        - revive
-        - staticcheck
-        - govet
-        - misspell
-        - unconvert
-    
   max-issues-per-linter: 0
   max-same-issues: 0
-  new: false 
+  uniq-by-line: true
+  new: false

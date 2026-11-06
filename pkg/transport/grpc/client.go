@@ -23,10 +23,10 @@ func (t *grpcTransport) dialGRPCWithConfig(addr string, config *transport.Client
 	// Set up connection options
 	var opts []grpc.DialOption
 
-	// 🚨 Fix: Configure gRPC client keepalive parameters to prevent unexpected connection drops
+	// Configure gRPC client keepalive parameters for fast disconnect detection
 	opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
-		Time:                30 * time.Second, // Send keepalive ping every 30 seconds
-		Timeout:             5 * time.Second,  // Keepalive response timeout
+		Time:                5 * time.Second,  // Send keepalive ping every 5 seconds (fast detection)
+		Timeout:             10 * time.Second, // Keepalive response timeout
 		PermitWithoutStream: true,             // Allow keepalive when no active streams
 	}))
 
@@ -40,16 +40,20 @@ func (t *grpcTransport) dialGRPCWithConfig(addr string, config *transport.Client
 		logger.Debug("gRPC using insecure connection", "client_id", config.ClientID)
 	}
 
-	logger.Info("Connecting to gRPC endpoint", "client_id", config.ClientID, "addr", addr, "keepalive_time", "30s", "keepalive_timeout", "5s")
+	logger.Info("Connecting to gRPC endpoint", "client_id", config.ClientID, "addr", addr, "keepalive_time", "5s", "keepalive_timeout", "10s")
 
-	// Establish gRPC connection using NewClient (updated API)
-	conn, err := grpc.NewClient(addr, opts...)
+	// Use passthrough resolver to connect directly to the address without DNS resolution
+	// This is required for grpc.NewClient to work correctly with IP:port addresses
+	target := "passthrough:///" + addr
+
+	// Create gRPC client connection using the new API (grpc.NewClient)
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		logger.Error("Failed to create gRPC client", "client_id", config.ClientID, "addr", addr, "err", err)
 		return nil, fmt.Errorf("failed to create gRPC client: %v", err)
 	}
 
-	logger.Debug("gRPC connection established", "client_id", config.ClientID)
+	logger.Info("gRPC connection established", "client_id", config.ClientID)
 
 	// Create gRPC client
 	client := NewTransportServiceClient(conn)
@@ -68,6 +72,26 @@ func (t *grpcTransport) dialGRPCWithConfig(addr string, config *transport.Client
 
 	// Create bidirectional stream
 	stream, err := client.BiStream(streamCtx)
+	if err == nil {
+		// The server checks auth when the stream starts and sends headers only
+		// if it accepts. A rejected stream ends without headers, and Recv
+		// returns its status (e.g. Unauthenticated). Fail the dial in that case,
+		// like a websocket bad handshake.
+		accepted := make(chan metadata.MD, 1)
+		go func() {
+			hdr, _ := stream.Header()
+			accepted <- hdr
+		}()
+		select {
+		case hdr := <-accepted:
+			if hdr == nil {
+				_, err = stream.Recv()
+			}
+		case <-time.After(10 * time.Second):
+			// Older gateways send headers only with their first message but
+			// reject at once, so a stream still open here was accepted.
+		}
+	}
 	if err != nil {
 		if closeErr := conn.Close(); closeErr != nil {
 			logger.Warn("Error closing gRPC connection after stream failure", "err", closeErr)

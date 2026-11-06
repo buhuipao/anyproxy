@@ -1,7 +1,9 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,11 +233,12 @@ kZuMN5z5SlANRxCDg1oXhRfO3P8Yq7EBRRF8CZMixMFyP+9apYqtH6qAg3w=
 		expectServName string
 	}{
 		{
-			name:          "no TLS cert",
-			gatewayAddr:   "gateway.example.com:8080",
-			tlsCertPath:   "",
-			expectErr:     false,
-			expectRootCAs: false,
+			name:           "no TLS cert",
+			gatewayAddr:    "gateway.example.com:8080",
+			tlsCertPath:    "",
+			expectErr:      false,
+			expectRootCAs:  false,
+			expectServName: "gateway.example.com",
 		},
 		{
 			name:           "with valid TLS cert",
@@ -651,6 +654,13 @@ func TestCompileHostPatternTypes(t *testing.T) {
 			expectErr:     true,
 			errorContains: "invalid regex pattern",
 		},
+		{
+			name:          "Bracketed non-IP is not a regex",
+			pattern:       "[fe80::1%eth0]",
+			expectedType:  "",
+			expectErr:     true,
+			errorContains: "is not an IP address",
+		},
 	}
 
 	for _, tt := range tests {
@@ -674,6 +684,116 @@ func TestCompileHostPatternTypes(t *testing.T) {
 				if pattern.Original != tt.pattern {
 					t.Errorf("Expected original pattern '%s', got '%s'", tt.pattern, pattern.Original)
 				}
+			}
+		})
+	}
+}
+
+func TestHostFilterBypass(t *testing.T) {
+	tests := []struct {
+		name          string
+		forbidden     []string
+		allowed       []string
+		address       string
+		ips           []string
+		expectAllowed bool
+	}{
+		{"plain host exact", nil, []string{"example.com"}, "example.com:443", nil, true},
+		{"plain host ignores case", nil, []string{"example.com"}, "EXAMPLE.com:443", nil, true},
+		{"plain host is not a suffix match", nil, []string{"example.com"}, "evilexample.com:443", nil, false},
+		{"plain host is not a prefix match", nil, []string{"example.com"}, "example.com.attacker.io:443", nil, false},
+		{"plain host dot is literal", nil, []string{"example.com"}, "exampleXcom:443", nil, false},
+		{"plain host covers subdomains", nil, []string{"example.com"}, "api.EXAMPLE.com:443", nil, true},
+		{"forbidden plain host covers subdomains", []string{"internal.corp"}, nil, "db.internal.corp:5432", nil, false},
+		{"forbidden plain host covers deep subdomains", []string{"internal.corp"}, nil, "a.b.Internal.corp.:5432", nil, false},
+		{"forbidden host ignores case", []string{"localhost"}, nil, "LOCALHOST:80", nil, false},
+		{"forbidden host ignores trailing dot", []string{"localhost"}, nil, "localhost.:80", nil, false},
+		{"forbidden host:port ignores case", []string{"localhost:22"}, nil, "LocalHost:22", nil, false},
+		{"wildcard host matches with port", nil, []string{"*.internal.company.com"}, "a.internal.company.com:443", nil, true},
+		{"wildcard host ignores case", []string{"*.internal.company.com"}, nil, "A.Internal.Company.com:443", nil, false},
+		{"wildcard host is anchored", nil, []string{"*.internal.company.com"}, "a.internal.company.com.evil.io:443", nil, false},
+		{"wildcard:port ignores trailing dot", []string{"*.internal.company.com:22"}, nil, "db.internal.company.com.:22", nil, false},
+		{"wildcard:* ignores trailing dot", []string{"*.internal.company.com:*"}, nil, "db.internal.company.com.:443", nil, false},
+		{"bare IP forbids a name resolving to it", []string{"127.0.0.1"}, nil, "localhost:80", []string{"127.0.0.1"}, false},
+		{"bare IPv6 compiles and forbids", []string{"::1"}, nil, "[::1]:22", nil, false},
+		{"IP:port forbids a name resolving to it", []string{"127.0.0.1:22"}, nil, "localhost:22", []string{"127.0.0.1"}, false},
+		{"IP:port keeps its port", []string{"127.0.0.1:22"}, nil, "localhost:80", []string{"127.0.0.1"}, true},
+		{"IP:* forbids a name resolving to it", []string{"127.0.0.1:*"}, nil, "localhost:22", []string{"127.0.0.1"}, false},
+		{"CIDR forbids a name resolving into it", []string{"127.0.0.0/8"}, nil, "localhost:80", []string{"127.0.0.1"}, false},
+		{"CIDR forbids if any IP is in it", []string{"169.254.0.0/16"}, nil, "multi.example:80", []string{"8.8.8.8", "169.254.169.254"}, false},
+		{"CIDR allows only if every IP is in it", nil, []string{"10.0.0.0/8"}, "multi.example:80", []string{"10.0.0.1", "8.8.8.8"}, false},
+		{"CIDR allows a name inside it", nil, []string{"10.0.0.0/8"}, "svc.example:80", []string{"10.0.0.1"}, true},
+		{"IPv4 CIDR forbids an IPv4-mapped IPv6 target", []string{"127.0.0.0/8"}, nil, "[::ffff:127.0.0.1]:80", nil, false},
+		{"IPv4 CIDR forbids a name resolving to a mapped IP", []string{"10.0.0.0/8"}, nil, "svc.example:80", []string{"::ffff:10.0.0.1"}, false},
+		{"IPv6 CIDR forbids a name resolving into it", []string{"fc00::/7"}, nil, "svc.example:80", []string{"8.8.8.8", "fd00::1"}, false},
+		{"bracketed IPv6:port forbids", []string{"[::1]:22"}, nil, "[::1]:22", nil, false},
+		{"bracketed IPv6:port keeps its port", []string{"[::1]:22"}, nil, "[::1]:80", nil, true},
+		{"bracketed IPv6:* forbids any port", []string{"[::1]:*"}, nil, "[::1]:80", nil, false},
+		{"bracketed IPv6:* is not a regex", nil, []string{"[::1]:*"}, "example.com:80", nil, false},
+		{"bracketed IPv6 forbids any port", []string{"[::1]"}, nil, "[::1]:22", nil, false},
+		{"bracketed IPv6 is not a regex", nil, []string{"[::1]"}, "example.com:80", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{config: &config.ClientConfig{ClientID: "test-client", ForbiddenHosts: tt.forbidden, AllowedHosts: tt.allowed}}
+			if err := client.compileHostPatterns(); err != nil {
+				t.Fatalf("Failed to compile patterns: %v", err)
+			}
+			var ips []net.IP
+			for _, s := range tt.ips {
+				ips = append(ips, net.ParseIP(s))
+			}
+			if got := client.isConnectionAllowed(tt.address, ips...); got != tt.expectAllowed {
+				t.Errorf("isConnectionAllowed(%s, %v) = %v, want %v", tt.address, tt.ips, got, tt.expectAllowed)
+			}
+		})
+	}
+}
+
+func TestResolveTargetIPv4Only(t *testing.T) {
+	ips, port, err := resolveTarget(context.Background(), "tcp4", "localhost:18999")
+	if err != nil {
+		t.Fatalf("resolveTarget() error = %v", err)
+	}
+	if port != "18999" || len(ips) == 0 {
+		t.Fatalf("resolveTarget() = %v, %q", ips, port)
+	}
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			t.Errorf("resolveTarget(tcp4) returned non-IPv4 address %v", ip)
+		}
+	}
+}
+
+func TestPassesNameRules(t *testing.T) {
+	tests := []struct {
+		name      string
+		forbidden []string
+		allowed   []string
+		address   string
+		want      bool
+	}{
+		{"forbidden name", []string{"kubernetes.default.svc"}, nil, "kubernetes.default.svc:443", false},
+		{"forbidden name covers subdomains", []string{"internal.corp"}, nil, "db.internal.corp:5432", false},
+		{"forbidden name stops at label boundary", []string{"internal.corp"}, nil, "evilinternal.corp:5432", true},
+		{"allowlist name covers subdomains", nil, []string{"example.com"}, "api.example.com:443", true},
+		{"allowlist miss by name", nil, []string{"api.production.com:443"}, "data.attacker-zone.com:80", false},
+		{"allowlist match by name", nil, []string{"api.production.com:443"}, "api.production.com:443", true},
+		{"allowlist with CIDR waits for resolve", nil, []string{"api.production.com:443", "10.0.0.0/8"}, "svc.internal:80", true},
+		{"forbidden CIDR waits for resolve", []string{"127.0.0.0/8"}, nil, "localhost:80", true},
+		{"forbidden name ignores trailing dot", []string{"*.internal.company.com:22"}, nil, "db.internal.company.com.:22", false},
+		{"no rules", nil, nil, "example.com:80", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{config: &config.ClientConfig{ClientID: "test-client", ForbiddenHosts: tt.forbidden, AllowedHosts: tt.allowed}}
+			if err := client.compileHostPatterns(); err != nil {
+				t.Fatalf("Failed to compile patterns: %v", err)
+			}
+			if got := client.passesNameRules(tt.address); got != tt.want {
+				t.Errorf("passesNameRules(%s) = %v, want %v", tt.address, got, tt.want)
 			}
 		})
 	}

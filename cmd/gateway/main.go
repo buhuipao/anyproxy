@@ -4,12 +4,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
-	"github.com/buhuipao/anyproxy/pkg/common/ratelimit"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/gateway"
 	"github.com/buhuipao/anyproxy/pkg/logger"
@@ -21,12 +21,21 @@ func main() {
 	configFile := flag.String("config", "configs/config.yaml", "Path to the configuration file")
 	flag.Parse()
 
-	// Load configuration
+	// Load configuration first (without logging, since logger is not initialized yet)
 	cfg, err := config.LoadConfig(*configFile)
 	if err != nil {
-		logger.Error("Failed to load configuration", "err", err)
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Initialize logger FIRST before any logging calls
+	if err := logger.Init(&cfg.Log); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Now we can use logger
+	logger.Info("Configuration loaded", "file", *configFile)
 
 	// Validate configuration (additional validation with clear error messages)
 	if err := cfg.Validate(); err != nil {
@@ -34,11 +43,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize logger
-	if err := logger.Init(&cfg.Log); err != nil {
-		logger.Error("Failed to initialize logger", "err", err)
-		os.Exit(1)
-	}
+	// Log configuration summary
+	logger.Info("Configuration validated successfully",
+		"listen_addr", cfg.Gateway.ListenAddr,
+		"transport_type", cfg.Gateway.TransportType,
+		"http_proxy", cfg.Gateway.Proxy.HTTP.ListenAddr != "",
+		"socks5_proxy", cfg.Gateway.Proxy.SOCKS5.ListenAddr != "",
+		"tuic_proxy", cfg.Gateway.Proxy.TUIC.ListenAddr != "",
+		"tls_enabled", cfg.Gateway.TLSCert != "",
+		"log_level", cfg.Log.Level,
+	)
 
 	// Create and start gateway (using WebSocket transport layer)
 	gw, err := gateway.NewGateway(cfg, cfg.Gateway.TransportType)
@@ -54,16 +68,15 @@ func main() {
 	// Initialize web services if enabled
 	var webServer *gatewayWeb.WebServer
 	if cfg.Gateway.Web.Enabled {
-		// Initialize rate limiter (without storage)
-		rateLimiter := ratelimit.NewRateLimiter(nil)
-
 		// Create web server
-		webServer = gatewayWeb.NewGatewayWebServer(cfg.Gateway.Web.ListenAddr, cfg.Gateway.Web.StaticDir, rateLimiter)
+		webServer = gatewayWeb.NewGatewayWebServer(cfg.Gateway.Web.ListenAddr, cfg.Gateway.Web.StaticDir)
 
-		// Configure authentication if enabled
-		if cfg.Gateway.Web.AuthEnabled {
-			webServer.SetAuth(true, cfg.Gateway.Web.AuthUsername, cfg.Gateway.Web.AuthPassword)
-		}
+		// Configure authentication; the credentials also guard the platform API
+		// even when the console login is disabled
+		webServer.SetAuth(cfg.Gateway.Web.AuthEnabled, cfg.Gateway.Web.AuthUsername, cfg.Gateway.Web.AuthPassword)
+
+		// Set credential manager for SaaS API
+		webServer.SetCredentialManager(gw.GetCredentialManager())
 
 		// Start web server in a separate goroutine
 		go func() {
@@ -106,4 +119,10 @@ func main() {
 	}
 
 	logger.Info("Gateway stopped")
+
+	// Close logger to flush any buffered logs
+	if err := logger.Close(); err != nil {
+		// Use fmt since logger is being closed
+		fmt.Fprintf(os.Stderr, "Error closing logger: %v\n", err)
+	}
 }

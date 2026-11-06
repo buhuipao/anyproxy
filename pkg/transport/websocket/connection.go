@@ -50,6 +50,19 @@ func (c *webSocketConnectionWithInfo) WriteMessage(data []byte) error {
 	return c.writer.WriteMessage(data)
 }
 
+// WriteMessageNoCopy implements transport.NoCopyWriter
+// WebSocket writer already uses fire-and-forget pattern, so this is the same as WriteMessage
+// 🔧 PERFORMANCE: Caller guarantees data won't be modified
+func (c *webSocketConnectionWithInfo) WriteMessageNoCopy(data []byte) error {
+	return c.writer.WriteMessage(data)
+}
+
+// WriteStreamBuffer implements transport.StreamBufferWriter
+// 🔧 ZERO-COPY: Takes ownership of the buffer and releases it after writing.
+func (c *webSocketConnectionWithInfo) WriteStreamBuffer(sb transport.StreamBuffer) error {
+	return c.writer.WriteStreamBuffer(sb)
+}
+
 // ReadMessage implements transport.Connection
 func (c *webSocketConnectionWithInfo) ReadMessage() ([]byte, error) {
 	_, data, err := c.conn.ReadMessage()

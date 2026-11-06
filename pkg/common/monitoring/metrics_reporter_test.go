@@ -235,6 +235,9 @@ func TestMetricsReporter_ContextCancellation(t *testing.T) {
 	default:
 		t.Error("Context should be cancelled")
 	}
+
+	// Wait for the reporter goroutine so it cannot race with later tests.
+	reporter.Stop()
 }
 
 func TestMetricsReporter_ConcurrentStartStop(t *testing.T) {

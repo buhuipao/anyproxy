@@ -5,8 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/buhuipao/anyproxy/pkg/common/message"
+	"github.com/buhuipao/anyproxy/pkg/common/buffer"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
+	"github.com/buhuipao/anyproxy/pkg/transport"
 )
 
 // mockConnForHandler implements a minimal connection for message handler testing
@@ -153,127 +154,29 @@ func TestReadNextMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create client with mock connection
 			mockConn := &mockConnForHandler{
 				readData: tt.readData,
 				readErr:  tt.readErr,
 			}
-			client := &Client{
-				conn: mockConn,
-			}
-			// Initialize msgHandler
-			client.msgHandler = message.NewClientExtendedMessageHandler(mockConn)
+			client := &Client{}
+			client.setConnState(&connState{conn: mockConn})
 
-			// Read message
 			msg, err := client.readNextMessage()
 
-			// Check error
 			if (err != nil) != tt.expectErr {
 				t.Errorf("readNextMessage() error = %v, expectErr %v", err, tt.expectErr)
 				return
 			}
 
 			if !tt.expectErr && msg != nil {
-				// Check message type
 				if msgType, ok := msg["type"].(string); ok {
 					if msgType != tt.expectType {
 						t.Errorf("Expected type %s, got %s", tt.expectType, msgType)
 					}
 				}
 
-				// Run additional validation
 				if tt.validate != nil {
 					tt.validate(t, msg)
-				}
-			}
-		})
-	}
-}
-
-func TestWriteDataMessage(t *testing.T) {
-	tests := []struct {
-		name      string
-		connID    string
-		data      []byte
-		writeErr  error
-		expectErr bool
-	}{
-		{
-			name:      "successful write",
-			connID:    "conn-1",
-			data:      []byte("test data"),
-			expectErr: false,
-		},
-		{
-			name:      "empty data",
-			connID:    "conn-2",
-			data:      []byte{},
-			expectErr: false,
-		},
-		{
-			name:      "large data",
-			connID:    "conn-3",
-			data:      make([]byte, 10000),
-			expectErr: false,
-		},
-		{
-			name:      "write error",
-			connID:    "conn-4",
-			data:      []byte("test"),
-			writeErr:  errors.New("write failed"),
-			expectErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create mock connection
-			mockConn := &mockConnForHandler{
-				writeErr: tt.writeErr,
-			}
-
-			// Create client
-			client := &Client{
-				conn: mockConn,
-			}
-			// Initialize msgHandler
-			client.msgHandler = message.NewClientExtendedMessageHandler(mockConn)
-
-			// Write data message
-			err := client.writeDataMessage(tt.connID, tt.data)
-
-			// Check error
-			if (err != nil) != tt.expectErr {
-				t.Errorf("writeDataMessage() error = %v, expectErr %v", err, tt.expectErr)
-			}
-
-			// Verify binary message was written
-			if !tt.expectErr && mockConn.writeData != nil {
-				// Unpack and verify
-				version, msgType, payload, err := protocol.UnpackBinaryHeader(mockConn.writeData)
-				if err != nil {
-					t.Fatalf("Failed to unpack written message: %v", err)
-				}
-
-				if version != protocol.BinaryProtocolVersion {
-					t.Errorf("Expected version %d, got %d", protocol.BinaryProtocolVersion, version)
-				}
-
-				if msgType != protocol.BinaryMsgTypeData {
-					t.Errorf("Expected message type %d, got %d", protocol.BinaryMsgTypeData, msgType)
-				}
-
-				unpackedConnID, unpackedData, err := protocol.UnpackDataMessage(payload)
-				if err != nil {
-					t.Fatalf("Failed to unpack data message: %v", err)
-				}
-
-				if unpackedConnID != tt.connID {
-					t.Errorf("Expected connID %s, got %s", tt.connID, unpackedConnID)
-				}
-
-				if string(unpackedData) != string(tt.data) {
-					t.Errorf("Expected data %s, got %s", tt.data, unpackedData)
 				}
 			}
 		})
@@ -314,29 +217,19 @@ func TestWriteConnectResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock connection
 			mockConn := &mockConnForHandler{
 				writeErr: tt.writeErr,
 			}
+			client := &Client{}
+			client.setConnState(&connState{conn: mockConn})
 
-			// Create client
-			client := &Client{
-				conn: mockConn,
-			}
-			// Initialize msgHandler
-			client.msgHandler = message.NewClientExtendedMessageHandler(mockConn)
-
-			// Write connect response
 			err := client.writeConnectResponse(tt.connID, tt.success, tt.errorMsg)
 
-			// Check error
 			if (err != nil) != tt.expectErr {
 				t.Errorf("writeConnectResponse() error = %v, expectErr %v", err, tt.expectErr)
 			}
 
-			// Verify binary message was written
 			if !tt.expectErr && mockConn.writeData != nil {
-				// Unpack and verify
 				_, msgType, payload, err := protocol.UnpackBinaryHeader(mockConn.writeData)
 				if err != nil {
 					t.Fatalf("Failed to unpack written message: %v", err)
@@ -389,29 +282,19 @@ func TestWriteCloseMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create mock connection
 			mockConn := &mockConnForHandler{
 				writeErr: tt.writeErr,
 			}
+			client := &Client{}
+			client.setConnState(&connState{conn: mockConn})
 
-			// Create client
-			client := &Client{
-				conn: mockConn,
-			}
-			// Initialize msgHandler
-			client.msgHandler = message.NewClientExtendedMessageHandler(mockConn)
-
-			// Write close message
 			err := client.writeCloseMessage(tt.connID)
 
-			// Check error
 			if (err != nil) != tt.expectErr {
 				t.Errorf("writeCloseMessage() error = %v, expectErr %v", err, tt.expectErr)
 			}
 
-			// Verify binary message was written
 			if !tt.expectErr && mockConn.writeData != nil {
-				// Unpack and verify
 				_, msgType, payload, err := protocol.UnpackBinaryHeader(mockConn.writeData)
 				if err != nil {
 					t.Fatalf("Failed to unpack written message: %v", err)
@@ -431,5 +314,32 @@ func TestWriteCloseMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// streamOnlyConn is a transport without datagrams, like WebSocket or gRPC
+type streamOnlyConn struct {
+	mockConnForHandler
+	streamWrites int
+}
+
+func (m *streamOnlyConn) WriteStreamBuffer(sb transport.StreamBuffer) error {
+	m.streamWrites++
+	sb.Release()
+	return nil
+}
+
+func TestWriteDataMessageDatagramWithoutDatagrams(t *testing.T) {
+	conn := &streamOnlyConn{}
+	client := &Client{}
+	client.setConnState(&connState{conn: conn, smartWriter: buffer.NewSmartWriter(conn, "")})
+
+	sb := buffer.AcquireLarge()
+	sb.SetDataLen(copy(sb.DataSlice(), "small reply"))
+	if err := client.writeDataMessageDatagram("conn-1", sb); err != nil {
+		t.Fatalf("writeDataMessageDatagram() error = %v", err)
+	}
+	if conn.streamWrites != 1 {
+		t.Fatalf("small UDP packet was not sent on the stream: %d stream writes, want 1", conn.streamWrites)
 	}
 }

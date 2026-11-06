@@ -1,184 +1,378 @@
-// Package protocols provides TUIC proxy implementation based on official TUIC specification
+// Package protocols provides TUIC v5 proxy implementation using sing-quic library
+// This implementation is compatible with Clash Meta and sing-box clients
 package protocols
 
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	commonctx "github.com/buhuipao/anyproxy/pkg/common/context"
+	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/utils"
 	"github.com/buhuipao/anyproxy/pkg/config"
 	"github.com/buhuipao/anyproxy/pkg/logger"
+	"github.com/google/uuid"
+	"github.com/sagernet/sing-quic/tuic"
+	"github.com/sagernet/sing/common/auth"
+	"github.com/sagernet/sing/common/buf"
+	singLogger "github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	sTLS "github.com/sagernet/sing/common/tls"
 )
 
-// TUIC Protocol Constants based on official specification
-const (
-	// TUIC Protocol Version
-	TUICVersion = 0x05
+// stdServerConfig wraps *tls.Config to implement sTLS.ServerConfig interface
+type stdServerConfig struct {
+	config *tls.Config
+}
 
-	// TUIC Command Types
-	TUICCmdAuthenticate = 0x00 // for authenticating the multiplexed stream
-	TUICCmdConnect      = 0x01 // for establishing a TCP relay
-	TUICCmdPacket       = 0x02 // for relaying (fragmented part of) a UDP packet
-	TUICCmdDissociate   = 0x03 // for terminating a UDP relaying session
-	TUICCmdHeartbeat    = 0x04 // for keeping the QUIC connection alive
+func newStdServerConfig(config *tls.Config) sTLS.ServerConfig {
+	return &stdServerConfig{config: config}
+}
 
-	// TUIC Address Types (as per official TUIC specification)
-	TUICAddrNone   = 0xff // None (used in Packet commands that is not the first fragment)
-	TUICAddrDomain = 0x00 // Fully-qualified domain name (first byte indicates length)
-	TUICAddrIPv4   = 0x01 // IPv4 address
-	TUICAddrIPv6   = 0x02 // IPv6 address
+func (s *stdServerConfig) ServerName() string {
+	return s.config.ServerName
+}
 
-	// TUIC Authentication Constants
-	TUICUUIDLength  = 16 // UUID length in bytes
-	TUICTokenLength = 32 // Token length in bytes
-)
+func (s *stdServerConfig) SetServerName(serverName string) {
+	s.config.ServerName = serverName
+}
 
-// TUICProxy implements the TUIC proxy protocol
-type TUICProxy struct {
-	config         *config.TUICConfig
-	listener       net.PacketConn
+func (s *stdServerConfig) NextProtos() []string {
+	return s.config.NextProtos
+}
+
+func (s *stdServerConfig) SetNextProtos(nextProto []string) {
+	s.config.NextProtos = nextProto
+}
+
+func (s *stdServerConfig) Config() (*sTLS.STDConfig, error) {
+	return s.config, nil
+}
+
+func (s *stdServerConfig) Client(conn net.Conn) (sTLS.Conn, error) {
+	tlsConn := tls.Client(conn, s.config)
+	return &stdTLSConn{tlsConn}, nil
+}
+
+func (s *stdServerConfig) Clone() sTLS.Config {
+	return &stdServerConfig{config: s.config.Clone()}
+}
+
+func (s *stdServerConfig) Start() error {
+	return nil
+}
+
+func (s *stdServerConfig) Close() error {
+	return nil
+}
+
+func (s *stdServerConfig) Server(conn net.Conn) (sTLS.Conn, error) {
+	tlsConn := tls.Server(conn, s.config)
+	return &stdTLSConn{tlsConn}, nil
+}
+
+// stdTLSConn wraps *tls.Conn to implement sTLS.Conn interface
+type stdTLSConn struct {
+	*tls.Conn
+}
+
+func (c *stdTLSConn) NetConn() net.Conn {
+	return c.Conn.NetConn()
+}
+
+func (c *stdTLSConn) ConnectionState() sTLS.ConnectionState {
+	return c.Conn.ConnectionState()
+}
+
+// singLoggerAdapter adapts our slog logger to sing's logger.Logger interface
+type singLoggerAdapter struct{}
+
+// Ensure singLoggerAdapter implements singLogger.Logger at compile time
+var _ singLogger.Logger = (*singLoggerAdapter)(nil)
+
+func (l *singLoggerAdapter) Trace(args ...any) {
+	logger.Debug("TUIC [trace]", "args", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Debug(args ...any) {
+	logger.Debug("TUIC", "msg", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Info(args ...any) {
+	logger.Info("TUIC", "msg", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Warn(args ...any) {
+	logger.Warn("TUIC", "msg", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Error(args ...any) {
+	logger.Error("TUIC", "msg", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Fatal(args ...any) {
+	logger.Error("TUIC [fatal]", "msg", fmt.Sprint(args...))
+}
+
+func (l *singLoggerAdapter) Panic(args ...any) {
+	logger.Error("TUIC [panic]", "msg", fmt.Sprint(args...))
+}
+
+// TUICv5Proxy implements TUIC v5 proxy using sing-quic library
+// Compatible with Clash Meta and sing-box clients
+type TUICv5Proxy struct {
+	config   *config.TUICConfig
+	tlsCert  string
+	tlsKey   string
+	running  bool
+	mu       sync.Mutex
+	stopCh   chan struct{}
+	stopOnce sync.Once // 🛡️ Ensure stopCh is only closed once
+	wg       sync.WaitGroup
+
+	// UDP listener for QUIC
+	udpConn *net.UDPConn
+
+	// sing-quic TUIC service
+	service *tuic.Service[string]
+
+	// anyproxy integration
 	dialFunc       func(ctx context.Context, network, addr string) (net.Conn, error)
-	groupValidator func(string, string) bool // Function to validate group credentials
-	tlsCert        string                    // Gateway TLS certificate path
-	tlsKey         string                    // Gateway TLS key path
-	running        bool
-	mu             sync.Mutex
-	stopCh         chan struct{}
-	wg             sync.WaitGroup
+	groupValidator func(string, string) bool
 
-	// Authentication - using group-based validation
-	authenticatedClients map[string]*TUICClient
-	clientsMu            sync.RWMutex
-
-	// UDP sessions management
-	udpSessions   map[string]map[uint16]*TUICUDPSession
-	udpSessionsMu sync.RWMutex
-
-	// Packet reassembly
-	packetAssemblers map[string]map[uint16]*TUICPacketAssembler
-	assemblersMu     sync.RWMutex
+	// User management (group_id -> password)
+	users   map[string]string
+	usersMu sync.RWMutex
 }
 
-// TUICClient represents an authenticated TUIC client
-type TUICClient struct {
-	ID            string
-	UUID          []byte
-	Token         []byte
-	RemoteAddr    net.Addr
-	Authenticated bool
-	LastSeen      time.Time
-	mu            sync.Mutex
+// TUICCredentialObserver interface for credential manager callback
+// This avoids import cycle between protocols and credential packages
+type TUICCredentialObserver interface {
+	OnCredentialUpdate(groupID, password string)
+	OnCredentialRemove(groupID string)
 }
 
-// TUICUDPSession represents a UDP relay session
-type TUICUDPSession struct {
-	AssocID    uint16
-	Client     *TUICClient
-	TargetConn net.PacketConn
-	LastUsed   time.Time
-	mu         sync.Mutex
+// TUICUserInitializer interface for initializing users from existing credentials
+type TUICUserInitializer interface {
+	InitializeUsers(users map[string]string)
 }
 
-// TUICPacketAssembler handles UDP packet fragmentation and reassembly
-type TUICPacketAssembler struct {
-	PacketID   uint16
-	FragTotal  uint8
-	Fragments  map[uint8][]byte
-	TargetAddr *TUICAddress
-	Size       uint16
-	CreatedAt  time.Time
-	mu         sync.Mutex
+// TUICv5Handler implements sing-quic's ServiceHandler interface
+// Bridges TUIC connections to anyproxy's routing system
+type TUICv5Handler struct {
+	proxy *TUICv5Proxy
 }
 
-// TUICCommand represents a TUIC command structure
-type TUICCommand struct {
-	Version uint8
-	Type    uint8
-	Data    []byte
+// Ensure TUICv5Handler implements the required interfaces
+var _ N.TCPConnectionHandlerEx = (*TUICv5Handler)(nil)
+var _ N.UDPConnectionHandlerEx = (*TUICv5Handler)(nil)
+
+// OnCredentialUpdate implements credential.CredentialObserver interface
+// This is called when group credentials are registered/updated in credential manager
+func (p *TUICv5Proxy) OnCredentialUpdate(groupID, password string) {
+	p.usersMu.Lock()
+	defer p.usersMu.Unlock()
+
+	// Store in local users map
+	p.users[groupID] = password
+
+	// Update sing-quic service users if service is running
+	if p.service != nil {
+		p.syncUsersToService()
+		logger.Debug("TUIC v5 user credential updated", "group_id", groupID)
+	} else {
+		logger.Debug("TUIC v5 credential stored (service not started yet)", "group_id", groupID)
+	}
 }
 
-// TUICAddress represents a TUIC address structure
-type TUICAddress struct {
-	Type uint8
-	Host string
-	Port uint16
+// OnCredentialRemove implements credential.CredentialObserver interface
+// This is called when group credentials are removed (e.g., client disconnects)
+func (p *TUICv5Proxy) OnCredentialRemove(groupID string) {
+	p.usersMu.Lock()
+	defer p.usersMu.Unlock()
+
+	// Remove from local users map
+	delete(p.users, groupID)
+
+	// Update sing-quic service users if service is running
+	if p.service != nil {
+		p.syncUsersToService()
+		logger.Debug("TUIC v5 user credential removed", "group_id", groupID)
+	}
 }
 
-// TUICPacketData represents Packet command data
-type TUICPacketData struct {
-	AssocID   uint16
-	PacketID  uint16
-	FragTotal uint8
-	FragID    uint8
-	Size      uint16
-	Address   *TUICAddress
-	Payload   []byte
-}
+// anyproxyTUICNamespace is a fixed namespace UUID for deriving TUIC user UUIDs
+// from non-UUID group IDs using UUID v5 (SHA-1 based, deterministic).
+var anyproxyTUICNamespace = uuid.MustParse("f1e2d3c4-b5a6-4789-8012-3456789abcde")
 
-// NewTUICProxyWithAuth creates a new TUIC proxy with authentication
-func NewTUICProxyWithAuth(cfg *config.TUICConfig, dialFn func(context.Context, string, string) (net.Conn, error), groupValidator func(string, string) bool, tlsCert, tlsKey string) (utils.GatewayProxy, error) {
-	if cfg.ListenAddr == "" {
-		return nil, fmt.Errorf("TUIC listen address is required")
+// groupIDToUUID converts groupID to TUIC UUID format.
+// If groupID is already a valid UUID string, it is parsed directly.
+// Otherwise, a deterministic UUID v5 is derived from the groupID.
+func groupIDToUUID(groupID string) (result [16]byte, formatted string) {
+	// Try parsing as UUID string (e.g., "901c0948-6d6a-4717-a9b3-a45d44568824")
+	if parsed, err := uuid.Parse(groupID); err == nil {
+		result = parsed
+		return result, parsed.String()
 	}
 
-	proxy := &TUICProxy{
-		config:               cfg,
-		dialFunc:             dialFn,
-		groupValidator:       groupValidator, // Use group validator instead of static token
-		tlsCert:              tlsCert,
-		tlsKey:               tlsKey,
-		authenticatedClients: make(map[string]*TUICClient),
-		udpSessions:          make(map[string]map[uint16]*TUICUDPSession),
-		packetAssemblers:     make(map[string]map[uint16]*TUICPacketAssembler),
-		stopCh:               make(chan struct{}),
+	// Derive deterministic UUID v5 from groupID
+	derived := uuid.NewSHA1(anyproxyTUICNamespace, []byte(groupID))
+	result = derived
+	return result, derived.String()
+}
+
+// syncUsersToService syncs all users to sing-quic service
+// Must be called with usersMu lock held
+func (p *TUICv5Proxy) syncUsersToService() {
+	var userList []string
+	var uuidList [][16]byte
+	var passwordList []string
+
+	for groupID, password := range p.users {
+		// Convert groupID to UUID (copy bytes, pad with zeros)
+		uuid, uuidStr := groupIDToUUID(groupID)
+		userList = append(userList, groupID)
+		uuidList = append(uuidList, uuid)
+		passwordList = append(passwordList, password)
+
+		// Log the UUID mapping for user reference
+		logger.Debug("TUIC user registered",
+			"group_id", groupID,
+			"uuid", uuidStr,
+			"hint", "Use this UUID in TUIC client config")
+	}
+
+	if len(userList) > 0 {
+		p.service.UpdateUsers(userList, uuidList, passwordList)
+		logger.Debug("Synced users to TUIC service", "count", len(userList))
+	}
+}
+
+// InitializeUsers loads initial credentials from credential manager
+// This should be called after the service is started
+func (p *TUICv5Proxy) InitializeUsers(users map[string]string) {
+	p.usersMu.Lock()
+	defer p.usersMu.Unlock()
+
+	for groupID, password := range users {
+		p.users[groupID] = password
+	}
+
+	if p.service != nil && len(p.users) > 0 {
+		p.syncUsersToService()
+		logger.Info("TUIC v5 initialized with existing users", "count", len(users))
+	}
+}
+
+// NewTUICv5ProxyWithAuth creates a new TUIC v5 proxy with authentication
+func NewTUICv5ProxyWithAuth(
+	cfg *config.TUICConfig,
+	dialFn func(context.Context, string, string) (net.Conn, error),
+	groupValidator func(string, string) bool,
+	tlsCert, tlsKey string,
+) (utils.GatewayProxy, error) {
+	if cfg.ListenAddr == "" {
+		return nil, fmt.Errorf("TUIC v5 listen address is required")
+	}
+
+	proxy := &TUICv5Proxy{
+		config:         cfg,
+		tlsCert:        tlsCert,
+		tlsKey:         tlsKey,
+		dialFunc:       dialFn,
+		groupValidator: groupValidator,
+		users:          make(map[string]string),
+		stopCh:         make(chan struct{}),
 	}
 
 	return proxy, nil
 }
 
-// Start starts the TUIC proxy
-func (p *TUICProxy) Start() error {
+// Start starts the TUIC v5 proxy
+func (p *TUICv5Proxy) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.running {
-		return fmt.Errorf("TUIC proxy is already running")
+		return fmt.Errorf("TUIC v5 proxy is already running")
 	}
 
-	// Create UDP listener
+	// Load TLS certificate
+	cert, err := tls.LoadX509KeyPair(p.tlsCert, p.tlsKey)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate: %w", err)
+	}
+
+	// Create standard TLS config
+	stdTLSConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   p.config.GetALPN(),
+		MinVersion:   tls.VersionTLS13,
+	}
+
+	// Wrap as sing TLS ServerConfig
+	singTLSConfig := newStdServerConfig(stdTLSConfig)
+
+	// Create UDP listener for QUIC
 	udpAddr, err := net.ResolveUDPAddr("udp", p.config.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 
-	listener, err := net.ListenUDP("udp", udpAddr)
+	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on UDP: %w", err)
+		return fmt.Errorf("failed to create UDP listener: %w", err)
+	}
+	p.udpConn = udpConn
+
+	// Create sing-quic TUIC service
+	handler := &TUICv5Handler{proxy: p}
+	service, err := tuic.NewService[string](tuic.ServiceOptions{
+		Context:           context.Background(),
+		Logger:            &singLoggerAdapter{}, // Required to prevent nil pointer panic
+		Handler:           handler,
+		TLSConfig:         singTLSConfig,
+		CongestionControl: p.config.GetCongestionControl(),
+		AuthTimeout:       time.Duration(p.config.GetAuthTimeout()) * time.Second,
+		ZeroRTTHandshake:  p.config.ZeroRTT,
+		Heartbeat:         time.Duration(p.config.GetHeartbeat()) * time.Second,
+		UDPTimeout:        time.Duration(p.config.GetMaxIdleTimeout()) * time.Second,
+	})
+	if err != nil {
+		_ = udpConn.Close()
+		return fmt.Errorf("failed to create TUIC service: %w", err)
+	}
+	p.service = service
+
+	// Start the service with UDP listener
+	err = p.service.Start(udpConn)
+	if err != nil {
+		_ = udpConn.Close()
+		return fmt.Errorf("failed to start TUIC service: %w", err)
 	}
 
-	p.listener = listener
 	p.running = true
 
-	logger.Info("TUIC proxy started", "listen", p.config.ListenAddr, "version", TUICVersion)
-
-	// Start packet handling
-	p.wg.Add(1)
-	go p.handlePackets()
-
-	// Start cleanup routine
-	p.wg.Add(1)
-	go p.cleanupRoutine()
+	logger.Info("TUIC v5 proxy started",
+		"listen", p.config.ListenAddr,
+		"congestion", p.config.GetCongestionControl(),
+		"udp_relay_mode", p.config.GetUDPRelayMode(),
+		"zero_rtt", p.config.ZeroRTT,
+	)
 
 	return nil
 }
 
-// Stop stops the TUIC proxy
-func (p *TUICProxy) Stop() error {
+// Stop stops the TUIC v5 proxy
+func (p *TUICv5Proxy) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -187,47 +381,23 @@ func (p *TUICProxy) Stop() error {
 	}
 
 	p.running = false
-	close(p.stopCh)
+	// 🛡️ Use sync.Once to prevent double-close panic
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+	})
 
-	if p.listener != nil {
-		// Set read deadline to immediately unblock any pending ReadFrom calls
-		if udpConn, ok := p.listener.(*net.UDPConn); ok {
-			if err := udpConn.SetReadDeadline(time.Now()); err != nil {
-				logger.Error("Failed to set read deadline during shutdown", "err", err)
-			}
-		}
-
-		if err := p.listener.Close(); err != nil {
-			logger.Error("Failed to close listener", "err", err)
+	if p.service != nil {
+		if err := p.service.Close(); err != nil {
+			logger.Error("Failed to close TUIC service", "err", err)
 		}
 	}
 
-	// Close all UDP sessions aggressively
-	p.udpSessionsMu.Lock()
-	sessionCount := 0
-	for _, clientSessions := range p.udpSessions {
-		for _, session := range clientSessions {
-			if session.TargetConn != nil {
-				sessionCount++
-				// Set read deadline to immediately unblock any pending ReadFrom calls
-				if err := session.TargetConn.SetReadDeadline(time.Now()); err != nil {
-					logger.Error("Failed to set read deadline during UDP session shutdown", "err", err)
-				}
-				if err := session.TargetConn.Close(); err != nil {
-					logger.Error("Failed to close UDP session", "err", err)
-				}
-			}
+	if p.udpConn != nil {
+		if err := p.udpConn.Close(); err != nil {
+			logger.Error("Failed to close UDP listener", "err", err)
 		}
 	}
-	p.udpSessionsMu.Unlock()
 
-	if sessionCount > 0 {
-		logger.Debug("Closed UDP sessions during shutdown", "session_count", sessionCount)
-	}
-
-	logger.Debug("Waiting for TUIC proxy goroutines to finish")
-
-	// Wait for goroutines with timeout to prevent indefinite blocking
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
@@ -236,829 +406,426 @@ func (p *TUICProxy) Stop() error {
 
 	select {
 	case <-done:
-		logger.Debug("All TUIC proxy goroutines finished gracefully")
+		logger.Debug("All TUIC v5 goroutines finished")
 	case <-time.After(3 * time.Second):
-		logger.Warn("Timeout waiting for TUIC proxy goroutines to finish")
+		logger.Warn("Timeout waiting for TUIC v5 goroutines")
 	}
 
-	logger.Info("TUIC proxy stopped")
+	logger.Info("TUIC v5 proxy stopped")
 	return nil
 }
 
 // IsRunning returns whether the proxy is running
-func (p *TUICProxy) IsRunning() bool {
+func (p *TUICv5Proxy) IsRunning() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.running
 }
 
-// handlePackets handles incoming UDP packets
-func (p *TUICProxy) handlePackets() {
-	defer p.wg.Done()
+// ============================================================================
+// TUICv5Handler - implements sing-quic ServiceHandler interface
+// ============================================================================
 
-	buffer := make([]byte, 4096)
+// NewConnectionEx handles TCP relay (TUIC Connect command)
+// Implements N.TCPConnectionHandlerEx interface
+func (h *TUICv5Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	target := destination.String()
+	startTime := time.Now()
+	connID := "tuic-tcp-" + utils.GenerateConnID()
+
+	// Extract groupID from sing-quic auth context
+	groupID, ok := auth.UserFromContext[string](ctx)
+	if !ok || groupID == "" {
+		logger.Error("TUIC v5 TCP: missing user context", "conn_id", connID, "source", source.String(), "target", target)
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+		return
+	}
+
+	logger.Info("TUIC v5 TCP: new connection", "conn_id", connID, "source", source.String(), "target", target, "group_id", groupID)
+
+	// 🔧 FIX: Register TCP connection with monitoring for web UI statistics
+	monitoring.CreateConnection(connID, groupID, "tuic-tcp:"+target)
+
+	// Create context with our user context for dial function
+	dialCtx := commonctx.WithUserContext(ctx, &utils.UserContext{GroupID: groupID})
+
+	go func() {
+		defer func() {
+			duration := time.Since(startTime)
+			// 🔧 FIX: Close connection in monitoring when TUIC TCP relay ends
+			monitoring.CloseConnection(connID)
+			logger.Debug("TUIC v5 TCP: connection closed", "conn_id", connID, "target", target, "group_id", groupID, "duration", duration)
+			if onClose != nil {
+				onClose(nil)
+			}
+		}()
+
+		logger.Debug("TUIC v5 TCP: dialing tunnel", "conn_id", connID, "target", target, "group_id", groupID)
+		targetConn, err := h.proxy.dialFunc(dialCtx, "tcp", target)
+		if err != nil {
+			logger.Error("TUIC v5 TCP: failed to dial tunnel", "conn_id", connID, "target", target, "group_id", groupID, "err", err)
+			_ = conn.Close()
+			return
+		}
+		defer func() { _ = targetConn.Close() }()
+		defer func() { _ = conn.Close() }()
+
+		logger.Info("TUIC v5 TCP: tunnel established, starting relay", "conn_id", connID, "target", target, "dial_duration", time.Since(startTime))
+
+		// Bidirectional copy with monitoring.
+		// When either direction finishes (e.g., Sunshine closes the RTSP connection),
+		// we must close BOTH conn and targetConn so the other io.Copy unblocks.
+		// Without this, wg.Wait() deadlocks: the stuck goroutine's conn.Read()
+		// blocks forever because conn.Close() is in a defer AFTER wg.Wait().
+		// This causes Moonlight to never see EOF on the TUIC stream, so it waits
+		// 15 seconds instead of proceeding to start UDP video/audio streams.
+		var wg sync.WaitGroup
+		var toTargetBytes, fromTargetBytes int64
+		done := make(chan struct{})
+		var doneOnce sync.Once
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			n, _ := io.Copy(targetConn, conn)
+			toTargetBytes = n
+			if n > 0 {
+				monitoring.UpdateConnectionBytes(connID, groupID, n, 0)
+			}
+			doneOnce.Do(func() { close(done) })
+		}()
+		go func() {
+			defer wg.Done()
+			n, _ := io.Copy(conn, targetConn)
+			fromTargetBytes = n
+			if n > 0 {
+				monitoring.UpdateConnectionBytes(connID, groupID, 0, n)
+			}
+			doneOnce.Do(func() { close(done) })
+		}()
+		<-done
+		_ = conn.Close()
+		_ = targetConn.Close()
+		wg.Wait()
+
+		logger.Debug("TUIC v5 TCP: relay finished", "conn_id", connID, "target", target, "to_target_bytes", toTargetBytes, "from_target_bytes", fromTargetBytes)
+	}()
+}
+
+// NewPacketConnectionEx handles UDP relay (TUIC Packet command)
+// Implements N.UDPConnectionHandlerEx interface
+func (h *TUICv5Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	target := destination.String()
+	startTime := time.Now()
+	connID := "tuic-udp-" + utils.GenerateConnID()
+
+	// Extract groupID from sing-quic auth context
+	groupID, ok := auth.UserFromContext[string](ctx)
+	if !ok || groupID == "" {
+		logger.Error("TUIC v5 UDP: missing user context", "conn_id", connID, "source", source.String(), "target", target)
+		// sing-quic passes a nil onClose, so close the association here or it is never released
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+		return
+	}
+
+	logger.Info("TUIC v5 UDP: new connection", "conn_id", connID, "source", source.String(), "target", target, "group_id", groupID)
+
+	// 🔧 FIX: Register UDP connection with monitoring for web UI statistics
+	monitoring.CreateConnection(connID, groupID, "tuic-udp:"+target)
+
+	// Create context with our user context for dial function
+	dialCtx := commonctx.WithUserContext(ctx, &utils.UserContext{GroupID: groupID})
+
+	go func() {
+		defer func() {
+			duration := time.Since(startTime)
+			// 🔧 FIX: Close connection in monitoring when TUIC UDP relay ends
+			monitoring.CloseConnection(connID)
+			logger.Debug("TUIC v5 UDP: connection closed", "conn_id", connID, "target", target, "group_id", groupID, "duration", duration)
+			if onClose != nil {
+				onClose(nil)
+			}
+		}()
+
+		h.relayUDPPackets(dialCtx, conn, connID, groupID)
+		logger.Debug("TUIC v5 UDP: relay finished", "conn_id", connID, "target", target, "total_duration", time.Since(startTime))
+	}()
+}
+
+const (
+	// tuicUDPQueueSize is how many packets can wait for one destination's tunnel.
+	tuicUDPQueueSize = 16
+	// tuicUDPMaxDestinations caps the open destinations of one association.
+	tuicUDPMaxDestinations = 256
+)
+
+// tuicUDPAssociation is the relay state of one TUIC UDP association (ASSOC_ID).
+type tuicUDPAssociation struct {
+	h           *TUICv5Handler
+	ctx         context.Context
+	client      N.PacketConn
+	connID      string
+	groupID     string
+	idleTimeout time.Duration
+	done        chan struct{} // closed when the association ends
+	wg          sync.WaitGroup
+	writeMu     sync.Mutex // serializes replies to client
+
+	mu        sync.Mutex
+	queues    map[string]chan []byte // packets waiting for each destination
+	capLogged bool
+}
+
+// relayUDPPackets relays one TUIC UDP association (ASSOC_ID) through the tunnel.
+// Like a UDP socket, one association can send to many destinations. Each
+// destination has its own goroutine and tunnel connection, opened on the first
+// packet to it, so a slow dial does not stall the other destinations. A
+// destination is closed after it has been idle for the UDP timeout. Each reply
+// is tagged with the destination it came from.
+//
+// The relay ends when the association is closed or has been idle for the
+// service UDPTimeout. sing-quic does not end associations when the QUIC
+// connection closes, so the idle timeout is what releases them in that case.
+func (h *TUICv5Handler) relayUDPPackets(ctx context.Context, client N.PacketConn, connID string, groupID string) {
+	logger.Debug("TUIC UDP relay: starting", "conn_id", connID)
+	a := &tuicUDPAssociation{
+		h:           h,
+		ctx:         ctx,
+		client:      client,
+		connID:      connID,
+		groupID:     groupID,
+		idleTimeout: time.Duration(h.proxy.config.GetMaxIdleTimeout()) * time.Second,
+		done:        make(chan struct{}),
+		queues:      make(map[string]chan []byte),
+	}
+
+	// Stats for logging
+	var clientToTargetPackets, clientToTargetBytes int64
+
+	defer func() {
+		// Closing the client makes sing-quic forget this association, so a
+		// later packet with the same ASSOC_ID starts a new relay.
+		_ = client.Close()
+		close(a.done)
+		a.wg.Wait()
+		logger.Debug("TUIC UDP relay: finished",
+			"conn_id", connID,
+			"client_to_target_packets", clientToTargetPackets,
+			"client_to_target_bytes", clientToTargetBytes)
+	}()
+
+	buffer := buf.NewSize(64 * 1024)
+	defer buffer.Release()
+
+	for {
+		// ReadPacket blocks until a packet arrives. It fails only when the
+		// association is closed or the idle timeout has passed.
+		buffer.Reset()
+		destination, err := client.ReadPacket(buffer)
+		if err != nil {
+			logger.Debug("TUIC UDP relay: association ended", "conn_id", connID, "err", err)
+			return
+		}
+		if buffer.Len() == 0 || !a.enqueue(destination, buffer.Bytes()) {
+			continue
+		}
+		clientToTargetPackets++
+		clientToTargetBytes += int64(buffer.Len())
+		// Sample logging: only log every 100 packets or first packet
+		if clientToTargetPackets == 1 || clientToTargetPackets%100 == 0 {
+			logger.Debug("TUIC UDP relay: client->target progress", "conn_id", connID, "total_packets", clientToTargetPackets, "total_bytes", clientToTargetBytes)
+		}
+	}
+}
+
+// enqueue hands a packet to its destination's goroutine and starts one for a
+// new destination. It never blocks: the packet is dropped when the queue is
+// full, or when it is for a new destination and the association is at the cap.
+func (a *tuicUDPAssociation) enqueue(destination M.Socksaddr, data []byte) bool {
+	key := destination.String()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	queue, ok := a.queues[key]
+	if !ok {
+		if len(a.queues) >= tuicUDPMaxDestinations {
+			if !a.capLogged {
+				a.capLogged = true
+				logger.Warn("TUIC UDP relay: too many destinations, dropping packets to new ones", "conn_id", a.connID, "max", tuicUDPMaxDestinations)
+			}
+			return false
+		}
+		queue = make(chan []byte, tuicUDPQueueSize)
+		a.queues[key] = queue
+		a.wg.Add(1)
+		go a.relayDestination(destination, queue)
+	}
+	select {
+	case queue <- bytes.Clone(data):
+		return true
+	default:
+		return false
+	}
+}
+
+// forget removes a destination, so the next packet to it starts over.
+func (a *tuicUDPAssociation) forget(key string) {
+	a.mu.Lock()
+	delete(a.queues, key)
+	a.mu.Unlock()
+}
+
+// forgetIdle removes a destination unless a packet is waiting for it.
+func (a *tuicUDPAssociation) forgetIdle(key string, queue <-chan []byte) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(queue) > 0 {
+		return false
+	}
+	delete(a.queues, key)
+	return true
+}
+
+// relayDestination dials the tunnel for one destination, then writes its
+// queued packets until the association ends, the tunnel fails, or there has
+// been no traffic in either direction for the idle timeout.
+func (a *tuicUDPAssociation) relayDestination(destination M.Socksaddr, queue <-chan []byte) {
+	defer a.wg.Done()
+	targetAddr := destination.String()
+	logger.Debug("TUIC v5 UDP: dialing tunnel", "conn_id", a.connID, "target", targetAddr, "group_id", a.groupID)
+	target, err := a.h.proxy.dialFunc(a.ctx, "udp", targetAddr)
+	if err != nil {
+		logger.Warn("TUIC v5 UDP: failed to dial tunnel", "conn_id", a.connID, "target", targetAddr, "group_id", a.groupID, "err", err)
+		a.holdFailed(targetAddr, queue)
+		return
+	}
+	logger.Info("TUIC v5 UDP: tunnel established", "conn_id", a.connID, "target", targetAddr, "type", fmt.Sprintf("%T", target))
+
+	var active atomic.Int64 // time of the last traffic, in Unix nanoseconds
+	active.Store(time.Now().UnixNano())
+	replies := make(chan struct{})
+	go func() {
+		defer close(replies)
+		a.relayReplies(target, destination, &active)
+	}()
+	defer func() {
+		// BufferedConn.SetReadDeadline is a no-op, so closing the tunnel
+		// connection is what unblocks the reply goroutine.
+		_ = target.Close()
+		<-replies
+	}()
+
+	idle := time.NewTimer(a.idleTimeout)
+	defer idle.Stop()
 	for {
 		select {
-		case <-p.stopCh:
-			return
-		default:
-		}
-
-		// Set a read deadline to avoid indefinite blocking
-		if udpConn, ok := p.listener.(*net.UDPConn); ok {
-			if err := udpConn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-				logger.Error("Failed to set read deadline", "err", err)
+		case data := <-queue:
+			n, err := target.Write(data)
+			if err != nil {
+				// The tunnel is gone. Forget it so the next packet dials a new one.
+				logger.Warn("TUIC UDP relay: tunnel write error", "conn_id", a.connID, "target", targetAddr, "err", err)
+				a.forget(targetAddr)
 				return
 			}
-		}
-
-		n, clientAddr, err := p.listener.ReadFrom(buffer)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Timeout is expected, continue the loop to check stopCh
+			// Update monitoring for UDP bytes sent (client -> target)
+			if n > 0 {
+				monitoring.UpdateConnectionBytes(a.connID, a.groupID, int64(n), 0)
+			}
+			active.Store(time.Now().UnixNano())
+		case <-idle.C:
+			// Replies count as traffic too, so check the real idle time.
+			if left := a.idleTimeout - time.Since(time.Unix(0, active.Load())); left > 0 {
+				idle.Reset(left)
 				continue
 			}
-			if p.isRunning() {
-				logger.Error("Failed to read UDP packet", "err", err)
+			if a.forgetIdle(targetAddr, queue) {
+				logger.Debug("TUIC UDP relay: destination idle, closing tunnel", "conn_id", a.connID, "target", targetAddr)
+				return
 			}
+			idle.Reset(a.idleTimeout)
+		case <-a.done:
 			return
 		}
-
-		if n > 0 {
-			p.handleTUICPacket(clientAddr, buffer[:n])
-		}
 	}
 }
 
-// isRunning safely checks if the proxy is running
-func (p *TUICProxy) isRunning() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.running
-}
-
-// handleTUICPacket handles a TUIC packet from client
-func (p *TUICProxy) handleTUICPacket(clientAddr net.Addr, data []byte) {
-	// Parse TUIC command
-	cmd, err := p.parseTUICCommand(data)
-	if err != nil {
-		logger.Error("Failed to parse TUIC command", "client", clientAddr, "err", err)
-		return
-	}
-
-	clientID := clientAddr.String()
-
-	// Handle different command types
-	switch cmd.Type {
-	case TUICCmdAuthenticate:
-		p.handleAuthenticate(clientAddr, clientID, cmd)
-	case TUICCmdConnect:
-		p.handleConnect(clientAddr, clientID, cmd)
-	case TUICCmdPacket:
-		p.handlePacket(clientAddr, clientID, cmd)
-	case TUICCmdDissociate:
-		p.handleDissociate(clientAddr, clientID, cmd)
-	case TUICCmdHeartbeat:
-		p.handleHeartbeat(clientAddr, clientID, cmd)
-	default:
-		logger.Error("Unknown TUIC command type", "client", clientAddr, "type", cmd.Type)
-	}
-}
-
-// parseTUICCommand parses a TUIC command from raw data
-func (p *TUICProxy) parseTUICCommand(data []byte) (*TUICCommand, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("command too short")
-	}
-
-	cmd := &TUICCommand{
-		Version: data[0],
-		Type:    data[1],
-		Data:    data[2:],
-	}
-
-	if cmd.Version != TUICVersion {
-		return nil, fmt.Errorf("unsupported protocol version: 0x%02x", cmd.Version)
-	}
-
-	return cmd, nil
-}
-
-// handleAuthenticate handles Authenticate command
-func (p *TUICProxy) handleAuthenticate(clientAddr net.Addr, clientID string, cmd *TUICCommand) {
-	logger.Debug("Handling TUIC Authenticate", "client", clientAddr)
-
-	// Parse authenticate data - UUID (group_id) + Token (password)
-	if len(cmd.Data) < TUICUUIDLength+TUICTokenLength {
-		logger.Error("Authenticate data too short", "client", clientAddr, "expected", TUICUUIDLength+TUICTokenLength, "actual", len(cmd.Data))
-		return
-	}
-
-	uuid := cmd.Data[:TUICUUIDLength]
-	token := cmd.Data[TUICUUIDLength : TUICUUIDLength+TUICTokenLength]
-
-	// Convert UUID bytes to group_id string and token bytes to password string
-	// Trim null bytes to handle variable-length strings in fixed-length byte arrays
-	groupID := string(bytes.TrimRight(uuid, "\x00"))
-	password := string(bytes.TrimRight(token, "\x00"))
-
-	// Validate credentials using group validator
-	if p.groupValidator != nil && !p.groupValidator(groupID, password) {
-		logger.Error("Authentication failed: invalid group credentials", "client", clientAddr, "group_id", groupID)
-		return
-	}
-
-	// Create/update client
-	p.clientsMu.Lock()
-	client := &TUICClient{
-		ID:            clientID,
-		UUID:          uuid,
-		Token:         token,
-		RemoteAddr:    clientAddr,
-		Authenticated: true,
-		LastSeen:      time.Now(),
-	}
-	p.authenticatedClients[clientID] = client
-	p.clientsMu.Unlock()
-
-	logger.Info("Client authenticated successfully", "client", clientAddr, "group_id", groupID)
-}
-
-// handleConnect handles Connect command
-func (p *TUICProxy) handleConnect(clientAddr net.Addr, clientID string, cmd *TUICCommand) {
-	logger.Debug("Handling TUIC Connect", "client", clientAddr)
-
-	// Check if client is authenticated
-	client := p.getAuthenticatedClient(clientID)
-	if client == nil {
-		logger.Error("Connect command from unauthenticated client", "client", clientAddr)
-		return
-	}
-
-	// Parse address
-	addr, err := p.parseAddress(cmd.Data)
-	if err != nil {
-		logger.Error("Failed to parse connect address", "client", clientAddr, "err", err)
-		return
-	}
-
-	target := p.formatAddress(addr)
-	logger.Debug("Handling TUIC Connect", "client", clientAddr, "target", target)
-
-	// Create TCP connection to target
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	targetConn, err := p.dialFunc(ctx, "tcp", target)
-	if err != nil {
-		logger.Error("Failed to connect to target", "client", clientAddr, "target", target, "err", err)
-		return
-	}
-
-	logger.Info("TCP connection established", "client", clientAddr, "target", target)
-
-	// Note: In a real QUIC implementation, this would establish a bidirectional stream
-	// For UDP-based simulation, we log the successful connection
-	// The actual TCP relay would happen through QUIC streams
-	defer func() {
-		if err := targetConn.Close(); err != nil {
-			logger.Error("Failed to close target connection", "err", err)
-		}
-	}()
-}
-
-// getAuthenticatedClient gets an authenticated client by ID
-func (p *TUICProxy) getAuthenticatedClient(clientID string) *TUICClient {
-	p.clientsMu.RLock()
-	defer p.clientsMu.RUnlock()
-
-	client, exists := p.authenticatedClients[clientID]
-	if !exists || !client.Authenticated {
-		return nil
-	}
-	return client
-}
-
-// parseAddress parses a TUIC address from data
-func (p *TUICProxy) parseAddress(data []byte) (*TUICAddress, error) {
-	if len(data) < 1 {
-		return nil, fmt.Errorf("address data too short")
-	}
-
-	addrType := data[0]
-
-	// Handle None address type first (only needs 1 byte)
-	if addrType == TUICAddrNone {
-		return &TUICAddress{Type: TUICAddrNone}, nil
-	}
-
-	// Other address types need at least 3 bytes (type + port)
-	if len(data) < 3 {
-		return nil, fmt.Errorf("address data too short")
-	}
-
-	var host string
-	var port uint16
-
-	switch addrType {
-	case TUICAddrIPv4:
-		if len(data) < 7 {
-			return nil, fmt.Errorf("IPv4 address too short")
-		}
-		ip := net.IP(data[1:5])
-		host = ip.String()
-		port = binary.BigEndian.Uint16(data[5:7])
-	case TUICAddrIPv6:
-		if len(data) < 19 {
-			return nil, fmt.Errorf("IPv6 address too short")
-		}
-		ip := net.IP(data[1:17])
-		host = ip.String()
-		port = binary.BigEndian.Uint16(data[17:19])
-	case TUICAddrDomain:
-		if len(data) < 4 {
-			return nil, fmt.Errorf("domain address too short")
-		}
-		domainLen := int(data[1])
-		if len(data) < 2+domainLen+2 {
-			return nil, fmt.Errorf("domain address truncated")
-		}
-		host = string(data[2 : 2+domainLen])
-		port = binary.BigEndian.Uint16(data[2+domainLen : 2+domainLen+2])
-	default:
-		return nil, fmt.Errorf("unknown address type: 0x%02x", addrType)
-	}
-
-	return &TUICAddress{
-		Type: addrType,
-		Host: host,
-		Port: port,
-	}, nil
-}
-
-// formatAddress formats a TUIC address to host:port string
-func (p *TUICProxy) formatAddress(addr *TUICAddress) string {
-	if addr.Type == TUICAddrNone {
-		return ""
-	}
-	return fmt.Sprintf("%s:%d", addr.Host, addr.Port)
-}
-
-// handlePacket handles Packet command
-func (p *TUICProxy) handlePacket(clientAddr net.Addr, clientID string, cmd *TUICCommand) {
-	logger.Debug("Handling TUIC Packet", "client", clientAddr)
-
-	// Check if client is authenticated
-	client := p.getAuthenticatedClient(clientID)
-	if client == nil {
-		logger.Error("Packet command from unauthenticated client", "client", clientAddr)
-		return
-	}
-
-	// Parse packet data
-	packetData, err := p.parsePacketData(cmd.Data)
-	if err != nil {
-		logger.Error("Failed to parse packet data", "client", clientAddr, "err", err)
-		return
-	}
-
-	logger.Debug("Handling TUIC Packet", "client", clientAddr, "assoc_id", packetData.AssocID,
-		"pkt_id", packetData.PacketID, "frag", fmt.Sprintf("%d/%d", packetData.FragID+1, packetData.FragTotal))
-
-	// Handle fragmentation
-	completePacket := p.handlePacketFragmentation(clientID, packetData)
-	if completePacket == nil {
-		// Fragmentation not complete yet
-		return
-	}
-
-	// Get or create UDP session
-	session := p.getOrCreateUDPSession(clientID, packetData.AssocID, client)
-	if session == nil {
-		logger.Error("Failed to create UDP session", "client", clientAddr, "assoc_id", packetData.AssocID)
-		return
-	}
-
-	// Forward UDP packet to target
-	target := p.formatAddress(completePacket.Address)
-	logger.Debug("Forwarding UDP packet", "client", clientAddr, "target", target, "size", len(completePacket.Payload))
-
-	// For UDP relay, we need to resolve the target address
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		logger.Error("Failed to resolve target UDP address", "target", target, "err", err)
-		return
-	}
-
-	_, err = session.TargetConn.WriteTo(completePacket.Payload, udpAddr)
-	if err != nil {
-		logger.Error("Failed to forward UDP packet", "client", clientAddr, "target", target, "err", err)
-		return
-	}
-
-	session.mu.Lock()
-	session.LastUsed = time.Now()
-	session.mu.Unlock()
-
-	logger.Debug("UDP packet forwarded successfully", "client", clientAddr, "target", target, "bytes", len(completePacket.Payload))
-}
-
-// parsePacketData parses Packet command data
-func (p *TUICProxy) parsePacketData(data []byte) (*TUICPacketData, error) {
-	if len(data) < 8 {
-		return nil, fmt.Errorf("packet data too short")
-	}
-
-	assocID := binary.BigEndian.Uint16(data[0:2])
-	packetID := binary.BigEndian.Uint16(data[2:4])
-	fragTotal := data[4]
-	fragID := data[5]
-	size := binary.BigEndian.Uint16(data[6:8])
-
-	// Parse address (if this is the first fragment)
-	var addr *TUICAddress
-	var payload []byte
-
-	if fragID == 0 {
-		// First fragment contains address
-		var err error
-		addr, err = p.parseAddress(data[8:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse address: %w", err)
-		}
-
-		addrLen := p.calculateAddressLength(data[8:])
-		payload = data[8+addrLen:]
-	} else {
-		// Subsequent fragments have no address
-		payload = data[8:]
-	}
-
-	return &TUICPacketData{
-		AssocID:   assocID,
-		PacketID:  packetID,
-		FragTotal: fragTotal,
-		FragID:    fragID,
-		Size:      size,
-		Address:   addr,
-		Payload:   payload,
-	}, nil
-}
-
-// calculateAddressLength calculates the length of address in data
-func (p *TUICProxy) calculateAddressLength(data []byte) int {
-	if len(data) < 1 {
-		return 0
-	}
-
-	addrType := data[0]
-	switch addrType {
-	case TUICAddrIPv4:
-		return 7 // Type(1) + IPv4(4) + Port(2)
-	case TUICAddrIPv6:
-		return 19 // Type(1) + IPv6(16) + Port(2)
-	case TUICAddrDomain:
-		if len(data) < 2 {
-			return 0
-		}
-		domainLen := int(data[1])
-		return 2 + domainLen + 2 // Type(1) + Len(1) + Domain + Port(2)
-	case TUICAddrNone:
-		return 1 // Type(1) only
-	default:
-		return 0
-	}
-}
-
-// handlePacketFragmentation handles UDP packet fragmentation and reassembly
-func (p *TUICProxy) handlePacketFragmentation(clientID string, packetData *TUICPacketData) *TUICPacketData {
-	p.assemblersMu.Lock()
-	defer p.assemblersMu.Unlock()
-
-	// Initialize client assemblers map if needed
-	if p.packetAssemblers[clientID] == nil {
-		p.packetAssemblers[clientID] = make(map[uint16]*TUICPacketAssembler)
-	}
-
-	assembler, exists := p.packetAssemblers[clientID][packetData.PacketID]
-	if !exists {
-		assembler = &TUICPacketAssembler{
-			PacketID:   packetData.PacketID,
-			FragTotal:  packetData.FragTotal,
-			Fragments:  make(map[uint8][]byte),
-			TargetAddr: packetData.Address,
-			Size:       packetData.Size,
-			CreatedAt:  time.Now(),
-		}
-		p.packetAssemblers[clientID][packetData.PacketID] = assembler
-	}
-
-	assembler.mu.Lock()
-	defer assembler.mu.Unlock()
-
-	// Store fragment
-	assembler.Fragments[packetData.FragID] = packetData.Payload
-
-	// Check if all fragments received
-	if len(assembler.Fragments) == int(assembler.FragTotal) {
-		// Reassemble packet
-		var completePayload []byte
-		for i := uint8(0); i < assembler.FragTotal; i++ {
-			if fragData, exists := assembler.Fragments[i]; exists {
-				completePayload = append(completePayload, fragData...)
-			} else {
-				// Missing fragment
-				return nil
-			}
-		}
-
-		// Create complete packet
-		completePacket := &TUICPacketData{
-			AssocID:   packetData.AssocID,
-			PacketID:  packetData.PacketID,
-			FragTotal: 1,
-			FragID:    0,
-			Size:      p.safeUint16(len(completePayload)),
-			Address:   assembler.TargetAddr,
-			Payload:   completePayload,
-		}
-
-		// Remove assembler
-		delete(p.packetAssemblers[clientID], packetData.PacketID)
-		return completePacket
-	}
-
-	return nil // Fragmentation not yet complete
-}
-
-// getOrCreateUDPSession gets or creates a UDP session
-func (p *TUICProxy) getOrCreateUDPSession(clientID string, assocID uint16, client *TUICClient) *TUICUDPSession {
-	p.udpSessionsMu.Lock()
-	defer p.udpSessionsMu.Unlock()
-
-	// Initialize client sessions map if needed
-	if p.udpSessions[clientID] == nil {
-		p.udpSessions[clientID] = make(map[uint16]*TUICUDPSession)
-	}
-
-	session, exists := p.udpSessions[clientID][assocID]
-	if !exists {
-		// Create UDP connection for relay
-		udpConn, err := net.ListenPacket("udp", ":0")
-		if err != nil {
-			logger.Error("Failed to create UDP connection", "client", client.RemoteAddr, "assoc_id", assocID, "err", err)
-			return nil
-		}
-
-		session = &TUICUDPSession{
-			AssocID:    assocID,
-			Client:     client,
-			TargetConn: udpConn,
-			LastUsed:   time.Now(),
-		}
-		p.udpSessions[clientID][assocID] = session
-
-		logger.Info("UDP session created", "client", client.RemoteAddr, "assoc_id", assocID)
-
-		// Start relay back to client
-		p.wg.Add(1)
-		go p.relayUDPBack(clientID, session)
-	}
-
-	return session
-}
-
-// relayUDPBack relays UDP packets back to client
-func (p *TUICProxy) relayUDPBack(clientID string, session *TUICUDPSession) {
-	defer p.wg.Done()
-	defer func() {
-		// Cleanup session
-		p.udpSessionsMu.Lock()
-		if clientSessions, exists := p.udpSessions[clientID]; exists {
-			delete(clientSessions, session.AssocID)
-		}
-		p.udpSessionsMu.Unlock()
-
-		if session.TargetConn != nil {
-			if err := session.TargetConn.Close(); err != nil {
-				logger.Error("Failed to close UDP session", "err", err)
-			}
-		}
-	}()
-
-	buffer := make([]byte, 4096)
+// holdFailed keeps a destination whose dial failed and drops its packets for
+// one idle timeout, counted from the failure, so a dead target is dialed once
+// per timeout instead of once per packet. Then a later packet dials again.
+func (a *tuicUDPAssociation) holdFailed(key string, queue <-chan []byte) {
+	hold := time.NewTimer(a.idleTimeout)
+	defer hold.Stop()
 	for {
 		select {
-		case <-p.stopCh:
+		case <-queue:
+		case <-hold.C:
+			a.forget(key)
 			return
-		default:
-		}
-
-		// Use shorter timeout to be more responsive to shutdown signals
-		if err := session.TargetConn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-			logger.Error("Failed to set read deadline", "err", err)
+		case <-a.done:
 			return
 		}
-
-		n, srcAddr, err := session.TargetConn.ReadFrom(buffer)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Check stop signal again after timeout
-				continue
-			}
-			logger.Debug("UDP relay read error", "assoc_id", session.AssocID, "err", err)
-			return
-		}
-
-		if n > 0 {
-			// Send packet back to client
-			p.sendUDPPacketToClient(session, srcAddr, buffer[:n])
-
-			session.mu.Lock()
-			session.LastUsed = time.Now()
-			session.mu.Unlock()
-		}
 	}
 }
 
-// sendUDPPacketToClient sends a UDP packet back to the client
-func (p *TUICProxy) sendUDPPacketToClient(session *TUICUDPSession, srcAddr net.Addr, data []byte) {
-	// Build address from source
-	addr := p.buildAddressFromNetAddr(srcAddr)
-	if addr == nil {
-		logger.Error("Failed to build address from net.Addr", "addr", srcAddr)
-		return
-	}
-
-	// Build packet data
-	packetData := &TUICPacketData{
-		AssocID:   session.AssocID,
-		PacketID:  0, // Simple implementation, no fragmentation for responses
-		FragTotal: 1,
-		FragID:    0,
-		Size:      p.safeUint16(len(data)),
-		Address:   addr,
-		Payload:   data,
-	}
-
-	// Build packet command
-	cmdData := p.buildPacketCommandData(packetData)
-	cmd := p.buildTUICCommand(TUICCmdPacket, cmdData)
-
-	// Send to client
-	_, err := p.listener.WriteTo(cmd, session.Client.RemoteAddr)
-	if err != nil {
-		logger.Error("Failed to send UDP packet to client", "client", session.Client.RemoteAddr,
-			"assoc_id", session.AssocID, "err", err)
-	}
-}
-
-// buildAddressFromNetAddr builds a TUIC address from net.Addr
-func (p *TUICProxy) buildAddressFromNetAddr(addr net.Addr) *TUICAddress {
-	switch a := addr.(type) {
-	case *net.UDPAddr:
-		if ip4 := a.IP.To4(); ip4 != nil {
-			return &TUICAddress{
-				Type: TUICAddrIPv4,
-				Host: ip4.String(),
-				Port: p.safeUint16(a.Port),
-			}
+// relayReplies copies replies from one destination's tunnel connection back
+// to the TUIC client, tagged with that destination as the source.
+func (a *tuicUDPAssociation) relayReplies(target net.Conn, destination M.Socksaddr, active *atomic.Int64) {
+	targetAddr := destination.String()
+	var targetToClientPackets, targetToClientBytes int64
+	defer func() {
+		// Recover from panic in case sing-quic panics on write after close
+		if r := recover(); r != nil {
+			logger.Warn("TUIC UDP relay: target->client recovered from panic", "conn_id", a.connID, "target", targetAddr, "panic", r)
 		}
-		return &TUICAddress{
-			Type: TUICAddrIPv6,
-			Host: a.IP.String(),
-			Port: p.safeUint16(a.Port),
-		}
-	default:
-		host, port, err := net.SplitHostPort(addr.String())
-		if err != nil {
-			return nil
-		}
-		if portNum, err := net.LookupPort("udp", port); err == nil {
-			return &TUICAddress{
-				Type: TUICAddrDomain,
-				Host: host,
-				Port: p.safeUint16(portNum),
-			}
-		}
-		return nil
-	}
-}
+		logger.Debug("TUIC UDP relay: target->client goroutine exiting",
+			"conn_id", a.connID,
+			"target", targetAddr,
+			"packets", targetToClientPackets,
+			"bytes", targetToClientBytes)
+	}()
 
-// buildPacketCommandData builds packet command data
-func (p *TUICProxy) buildPacketCommandData(packetData *TUICPacketData) []byte {
-	// Calculate address data size
-	addrData := p.encodeAddress(packetData.Address)
-
-	// Build command data
-	data := make([]byte, 8+len(addrData)+len(packetData.Payload))
-
-	binary.BigEndian.PutUint16(data[0:2], packetData.AssocID)
-	binary.BigEndian.PutUint16(data[2:4], packetData.PacketID)
-	data[4] = packetData.FragTotal
-	data[5] = packetData.FragID
-	binary.BigEndian.PutUint16(data[6:8], packetData.Size)
-
-	offset := 8
-	copy(data[offset:], addrData)
-	offset += len(addrData)
-	copy(data[offset:], packetData.Payload)
-
-	return data
-}
-
-// encodeAddress encodes a TUIC address to bytes
-func (p *TUICProxy) encodeAddress(addr *TUICAddress) []byte {
-	if addr.Type == TUICAddrNone {
-		return []byte{TUICAddrNone}
-	}
-
-	var data []byte
-	data = append(data, addr.Type)
-
-	switch addr.Type {
-	case TUICAddrIPv4:
-		ip := net.ParseIP(addr.Host).To4()
-		if ip == nil {
-			return []byte{TUICAddrNone}
-		}
-		data = append(data, ip...)
-	case TUICAddrIPv6:
-		ip := net.ParseIP(addr.Host).To16()
-		if ip == nil {
-			return []byte{TUICAddrNone}
-		}
-		data = append(data, ip...)
-	case TUICAddrDomain:
-		data = append(data, byte(len(addr.Host)))
-		data = append(data, []byte(addr.Host)...)
-	}
-
-	// Add port
-	portBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBytes, addr.Port)
-	data = append(data, portBytes...)
-
-	return data
-}
-
-// buildTUICCommand builds a TUIC command
-func (p *TUICProxy) buildTUICCommand(cmdType uint8, data []byte) []byte {
-	cmd := make([]byte, 2+len(data))
-	cmd[0] = TUICVersion
-	cmd[1] = cmdType
-	if len(data) > 0 {
-		copy(cmd[2:], data)
-	}
-	return cmd
-}
-
-// handleDissociate handles Dissociate command
-func (p *TUICProxy) handleDissociate(clientAddr net.Addr, clientID string, cmd *TUICCommand) {
-	logger.Debug("Handling TUIC Dissociate", "client", clientAddr)
-
-	// Check if client is authenticated
-	client := p.getAuthenticatedClient(clientID)
-	if client == nil {
-		logger.Error("Dissociate command from unauthenticated client", "client", clientAddr)
-		return
-	}
-
-	if len(cmd.Data) < 2 {
-		logger.Error("Dissociate data too short", "client", clientAddr)
-		return
-	}
-
-	assocID := binary.BigEndian.Uint16(cmd.Data[0:2])
-	logger.Debug("Handling TUIC Dissociate", "client", clientAddr, "assoc_id", assocID)
-
-	// Remove UDP session
-	p.udpSessionsMu.Lock()
-	if clientSessions, exists := p.udpSessions[clientID]; exists {
-		if session, exists := clientSessions[assocID]; exists {
-			if session.TargetConn != nil {
-				if err := session.TargetConn.Close(); err != nil {
-					logger.Error("Failed to close UDP session", "err", err)
-				}
-			}
-			delete(clientSessions, assocID)
-			logger.Info("UDP session dissociated", "client", clientAddr, "assoc_id", assocID)
-		}
-	}
-	p.udpSessionsMu.Unlock()
-}
-
-// handleHeartbeat handles Heartbeat command
-func (p *TUICProxy) handleHeartbeat(clientAddr net.Addr, clientID string, _ *TUICCommand) {
-	logger.Debug("Handling TUIC Heartbeat", "client", clientAddr)
-
-	// Check if client is authenticated
-	client := p.getAuthenticatedClient(clientID)
-	if client == nil {
-		logger.Error("Heartbeat command from unauthenticated client", "client", clientAddr)
-		return
-	}
-
-	// Update client last seen time
-	client.mu.Lock()
-	client.LastSeen = time.Now()
-	client.mu.Unlock()
-
-	// Send heartbeat response
-	response := p.buildTUICCommand(TUICCmdHeartbeat, nil)
-	_, err := p.listener.WriteTo(response, clientAddr)
-	if err != nil {
-		logger.Error("Failed to send heartbeat response", "client", clientAddr, "err", err)
-	}
-}
-
-// cleanupRoutine performs periodic cleanup
-func (p *TUICProxy) cleanupRoutine() {
-	defer p.wg.Done()
-
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
+	rawBuffer := make([]byte, 64*1024)
 	for {
-		select {
-		case <-p.stopCh:
+		// Read from tunnel - this blocks until data arrives or the connection is closed
+		n, err := target.Read(rawBuffer)
+		if err != nil {
+			logger.Debug("TUIC UDP relay: tunnel closed", "conn_id", a.connID, "target", targetAddr, "err", err)
 			return
-		case <-ticker.C:
-			p.cleanupExpiredSessions()
-			p.cleanupExpiredAssemblers()
+		}
+		if n == 0 {
+			continue
+		}
+
+		// Update monitoring for UDP bytes received (target -> client)
+		monitoring.UpdateConnectionBytes(a.connID, a.groupID, 0, int64(n))
+
+		// The defer recover will catch any panic from sing-quic
+		err = a.writeReply(rawBuffer[:n], destination)
+		if err != nil {
+			logger.Warn("TUIC UDP relay: client write error", "conn_id", a.connID, "target", targetAddr, "err", err)
+			// The association can no longer take replies; end it. This
+			// unblocks ReadPacket in relayUDPPackets.
+			_ = a.client.Close()
+			return
+		}
+		active.Store(time.Now().UnixNano())
+		targetToClientPackets++
+		targetToClientBytes += int64(n)
+		// Sample logging: only log every 100 packets or first packet
+		if targetToClientPackets == 1 || targetToClientPackets%100 == 0 {
+			logger.Debug("TUIC UDP relay: target->client progress", "conn_id", a.connID, "target", targetAddr, "total_packets", targetToClientPackets, "total_bytes", targetToClientBytes)
 		}
 	}
 }
 
-// cleanupExpiredSessions cleans up expired sessions
-func (p *TUICProxy) cleanupExpiredSessions() {
-	now := time.Now()
-	timeout := 5 * time.Minute
-
-	// Cleanup clients
-	p.clientsMu.Lock()
-	for id, client := range p.authenticatedClients {
-		client.mu.Lock()
-		if now.Sub(client.LastSeen) > timeout {
-			delete(p.authenticatedClients, id)
-			logger.Debug("Cleaned up expired client", "client", client.RemoteAddr)
-		}
-		client.mu.Unlock()
-	}
-	p.clientsMu.Unlock()
-
-	// Cleanup UDP sessions
-	p.udpSessionsMu.Lock()
-	for clientID, clientSessions := range p.udpSessions {
-		for assocID, session := range clientSessions {
-			session.mu.Lock()
-			if now.Sub(session.LastUsed) > timeout {
-				if session.TargetConn != nil {
-					if err := session.TargetConn.Close(); err != nil {
-						logger.Error("Failed to close expired UDP session", "err", err)
-					}
-				}
-				delete(clientSessions, assocID)
-				logger.Debug("Cleaned up expired UDP session", "client", clientID, "assoc_id", assocID)
-			}
-			session.mu.Unlock()
-		}
-		if len(clientSessions) == 0 {
-			delete(p.udpSessions, clientID)
-		}
-	}
-	p.udpSessionsMu.Unlock()
-}
-
-// cleanupExpiredAssemblers cleans up expired packet assemblers
-func (p *TUICProxy) cleanupExpiredAssemblers() {
-	now := time.Now()
-	timeout := 2 * time.Minute
-
-	p.assemblersMu.Lock()
-	for clientID, clientAssemblers := range p.packetAssemblers {
-		for pktID, assembler := range clientAssemblers {
-			assembler.mu.Lock()
-			if now.Sub(assembler.CreatedAt) > timeout {
-				delete(clientAssemblers, pktID)
-				logger.Debug("Cleaned up expired packet assembler", "client", clientID, "pkt_id", pktID)
-			}
-			assembler.mu.Unlock()
-		}
-		if len(clientAssemblers) == 0 {
-			delete(p.packetAssemblers, clientID)
-		}
-	}
-	p.assemblersMu.Unlock()
-}
-
-// safeUint16 safely converts an int to uint16 with overflow protection
-func (p *TUICProxy) safeUint16(value int) uint16 {
-	if value < 0 {
-		return 0
-	}
-	if value > 65535 {
-		return 65535
-	}
-	return uint16(value)
+// writeReply sends one reply to the TUIC client. sing-quic's packet conn is
+// not safe for concurrent writers, so replies from all destinations take turns.
+func (a *tuicUDPAssociation) writeReply(data []byte, destination M.Socksaddr) error {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	return a.client.WritePacket(buf.As(data), destination)
 }

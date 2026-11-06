@@ -5,7 +5,6 @@ package connection
 import (
 	"net"
 	"sync"
-	"time"
 
 	"github.com/buhuipao/anyproxy/pkg/logger"
 )
@@ -15,9 +14,7 @@ type Manager struct {
 	mu          sync.RWMutex
 	conns       map[string]net.Conn
 	msgChans    map[string]chan map[string]interface{}
-	clientID    string // For logging
-	connections map[string]*ConnWrapper
-	lastCleanup time.Time
+	clientID string // For logging
 }
 
 // NewManager creates a new connection manager
@@ -25,9 +22,7 @@ func NewManager(clientID string) *Manager {
 	return &Manager{
 		conns:       make(map[string]net.Conn),
 		msgChans:    make(map[string]chan map[string]interface{}),
-		clientID:    clientID,
-		connections: make(map[string]*ConnWrapper),
-		lastCleanup: time.Now(),
+		clientID: clientID,
 	}
 }
 
@@ -188,11 +183,3 @@ func (cm *Manager) GetMessageChannelCount() int {
 	return len(cm.msgChans)
 }
 
-// CleanupInactive removes inactive connections
-func (cm *Manager) CleanupInactive() {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	cm.lastCleanup = time.Now()
-	// Cleanup logic would go here
-}

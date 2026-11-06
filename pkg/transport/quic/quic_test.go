@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -9,8 +10,11 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/sagernet/quic-go"
 
 	"github.com/buhuipao/anyproxy/pkg/transport"
 )
@@ -325,4 +329,38 @@ func TestQUICConnection_StreamOperations(t *testing.T) {
 
 	// Clean up
 	trans.Close()
+}
+
+// fakeStream is a QUIC stream that accepts every write and blocks reads until closed.
+type fakeStream struct {
+	quic.Stream
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (s *fakeStream) Write(p []byte) (int, error)      { return len(p), nil }
+func (s *fakeStream) Read([]byte) (int, error)         { <-s.ctx.Done(); return 0, net.ErrClosed }
+func (s *fakeStream) Close() error                     { s.cancel(); return nil }
+func (s *fakeStream) SetWriteDeadline(time.Time) error { return nil }
+
+// Close used to close writeChan while writers were still sending on it,
+// which panicked with "send on closed channel".
+func TestQUICConnection_CloseWhileWriting(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		conn := newQUICServerConnection(&fakeStream{ctx: ctx, cancel: cancel}, nil, "c", "g", "")
+
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for conn.WriteMessage([]byte("x")) == nil {
+				}
+			}()
+		}
+		time.Sleep(time.Millisecond)
+		_ = conn.Close()
+		wg.Wait()
+	}
 }

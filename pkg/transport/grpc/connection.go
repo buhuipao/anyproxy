@@ -6,21 +6,21 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/buhuipao/anyproxy/pkg/logger"
 	"github.com/buhuipao/anyproxy/pkg/transport"
 )
 
 // 🆕 Write message type
 type writeRequest struct {
-	msgType StreamMessage_MessageType
-	data    []byte
-	errChan chan error
+	msgType   StreamMessage_MessageType
+	data      []byte
+	errChan   chan error
+	streamBuf transport.StreamBuffer // For StreamBuffer ownership transfer
 }
 
 // grpcStream unified stream interface
@@ -38,13 +38,14 @@ type grpcConnection struct {
 	groupID       string
 	groupPassword string // Client password for group credential management
 	// 🆕 Remove mutex, use async writes instead
-	writeChan chan *writeRequest // 🆕 Async write queue
-	closed    bool
+	writeChan chan *writeRequest // Async write queue; never closed, writers stop on ctx
+	closed    atomic.Bool
 	ctx       context.Context
 	cancel    context.CancelFunc
 	readChan  chan []byte
 	errorChan chan error
 	closeOnce sync.Once
+	done      chan struct{} // Closed when writeLoop has flushed and exited
 }
 
 var _ transport.Connection = (*grpcConnection)(nil)
@@ -59,11 +60,12 @@ func newGRPCConnection(stream TransportService_BiStreamClient, conn *grpc.Client
 		clientID:      clientID,
 		groupID:       groupID,
 		groupPassword: groupPassword,
-		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		writeChan:     make(chan *writeRequest, transport.WriteChannelSize),
 		ctx:           ctx,
 		cancel:        cancel,
-		readChan:      make(chan []byte, 100),
+		readChan:      make(chan []byte, transport.ReadChannelSize),
 		errorChan:     make(chan error, 1),
+		done:          make(chan struct{}),
 	}
 
 	// 🆕 Start read/write goroutines
@@ -82,11 +84,12 @@ func newGRPCServerConnection(stream TransportService_BiStreamServer, clientID, g
 		clientID:      clientID,
 		groupID:       groupID,
 		groupPassword: groupPassword,
-		writeChan:     make(chan *writeRequest, 1000), // 🆕 Async write queue
+		writeChan:     make(chan *writeRequest, transport.WriteChannelSize),
 		ctx:           ctx,
 		cancel:        cancel,
-		readChan:      make(chan []byte, 100),
+		readChan:      make(chan []byte, transport.ReadChannelSize),
 		errorChan:     make(chan error, 1),
+		done:          make(chan struct{}),
 	}
 
 	// 🆕 Start read/write goroutines
@@ -97,39 +100,42 @@ func newGRPCServerConnection(stream TransportService_BiStreamServer, clientID, g
 
 // 🆕 Async write goroutine, avoiding lock contention
 func (c *grpcConnection) writeLoop() {
-	defer func() {
-		// Clear error channels in the queue
-		for req := range c.writeChan {
-			if req.errChan != nil {
-				req.errChan <- fmt.Errorf("connection closed")
-				close(req.errChan)
-			}
-		}
-	}()
+	defer close(c.done)
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			return
+			// Flush what is already queued (e.g. a final error message)
+			// before exiting; a server's BiStream ends the RPC only after
+			// this, like the websocket drain.
+			if len(c.writeChan) == 0 {
+				return
+			}
 		case req := <-c.writeChan:
-			if c.closed {
-				if req.errChan != nil {
-					req.errChan <- fmt.Errorf("connection closed")
-					close(req.errChan)
-				}
-				continue
+			var data []byte
+			if req.streamBuf != nil {
+				// 🆕 Use StreamBuffer's Full() - no copy, direct reference
+				data = req.streamBuf.Full()
+			} else {
+				data = req.data
 			}
 
 			msg := &StreamMessage{
 				Type:     req.msgType,
-				Data:     req.data,
+				Data:     data,
 				ClientId: c.clientID,
 				GroupId:  c.groupID,
 			}
 
 			err := c.stream.Send(msg)
+
+			// Release StreamBuffer after send (protobuf may have copied internally)
+			if req.streamBuf != nil {
+				req.streamBuf.Release()
+			}
+
 			if err != nil && isGRPCError(err) {
-				c.closed = true
+				c.closed.Store(true)
 			}
 
 			if req.errChan != nil {
@@ -145,41 +151,72 @@ func (c *grpcConnection) WriteMessage(data []byte) error {
 	return c.writeMessageAsync(StreamMessage_DATA, data)
 }
 
-// 🆕 Async write method, lock-free design
-func (c *grpcConnection) writeMessageAsync(msgType StreamMessage_MessageType, data []byte) error {
-	if c.closed {
+// WriteMessageNoCopy implements transport.NoCopyWriter
+// 🔧 PERFORMANCE: Caller guarantees data won't be modified, skip copy
+func (c *grpcConnection) WriteMessageNoCopy(data []byte) error {
+	return c.writeMessageAsyncNoCopy(StreamMessage_DATA, data)
+}
+
+// WriteStreamBuffer implements transport.StreamBufferWriter
+// 🔧 ZERO-COPY: Avoids user-space copies by using StreamBuffer directly.
+// Note: gRPC/protobuf may still copy internally, but we avoid our copies.
+// Takes ownership of the StreamBuffer and releases it after sending.
+func (c *grpcConnection) WriteStreamBuffer(sb transport.StreamBuffer) error {
+	if c.closed.Load() {
+		sb.Release()
 		return fmt.Errorf("connection closed")
 	}
 
-	errChan := make(chan error, 1)
+	req := &writeRequest{
+		msgType:   StreamMessage_DATA,
+		streamBuf: sb,
+		errChan:   nil, // Fire-and-forget
+	}
+
+	// 🔧 FIX: Block until channel has space or context canceled
+	// Don't timeout and drop data - that causes unnecessary packet loss
+	select {
+	case c.writeChan <- req:
+		return nil
+	case <-c.ctx.Done():
+		sb.Release()
+		return c.ctx.Err()
+	}
+}
+
+// 🆕 Async write method, lock-free design
+func (c *grpcConnection) writeMessageAsync(msgType StreamMessage_MessageType, data []byte) error {
+	if c.closed.Load() {
+		return fmt.Errorf("connection closed")
+	}
+
+	// 🔧 CRITICAL FIX: Must copy data before async processing!
+	// The caller may reuse the buffer before our async write completes,
+	// causing data corruption (random byte modifications).
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	return c.writeMessageAsyncNoCopy(msgType, dataCopy)
+}
+
+// 🆕 Zero-copy async write - caller guarantees data independence
+func (c *grpcConnection) writeMessageAsyncNoCopy(msgType StreamMessage_MessageType, data []byte) error {
+	if c.closed.Load() {
+		return fmt.Errorf("connection closed")
+	}
+
 	req := &writeRequest{
 		msgType: msgType,
 		data:    data,
-		errChan: errChan,
+		errChan: nil, // No error channel = fire-and-forget
 	}
 
+	// 🔧 FIX: Block until channel has space or context canceled
+	// Don't timeout and drop data - that causes unnecessary packet loss
 	select {
 	case c.writeChan <- req:
-		// Wait for write result
-		select {
-		case err := <-errChan:
-			return err
-		case <-c.ctx.Done():
-			// 🆕 Ensure errChan doesn't leak
-			go func() {
-				select {
-				case <-errChan:
-					// Successfully consumed error
-				case <-time.After(5 * time.Second):
-					// Exit after timeout to prevent permanent blocking
-					logger.Warn("Timeout waiting for write error channel", "client_id", c.clientID)
-				}
-			}()
-			return c.ctx.Err()
-		}
+		return nil
 	case <-c.ctx.Done():
-		// 🆕 Ensure errChan doesn't leak
-		close(errChan)
 		return c.ctx.Err()
 	}
 }
@@ -187,7 +224,10 @@ func (c *grpcConnection) writeMessageAsync(msgType StreamMessage_MessageType, da
 // ReadMessage implements transport.Connection
 func (c *grpcConnection) ReadMessage() ([]byte, error) {
 	select {
-	case data := <-c.readChan:
+	case data, ok := <-c.readChan:
+		if !ok {
+			return nil, io.EOF // receiveLoop ended: the stream is closed
+		}
 		return data, nil
 	case err := <-c.errorChan:
 		return nil, err
@@ -200,15 +240,12 @@ func (c *grpcConnection) ReadMessage() ([]byte, error) {
 func (c *grpcConnection) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		c.closed = true
+		c.closed.Store(true)
 
 		// Cancel context
 		if c.cancel != nil {
 			c.cancel()
 		}
-
-		// 🆕 Close write queue
-		close(c.writeChan)
 
 		// Only client connections close the gRPC connection
 		if c.conn != nil {
@@ -221,14 +258,14 @@ func (c *grpcConnection) Close() error {
 // RemoteAddr implements transport.Connection
 func (c *grpcConnection) RemoteAddr() net.Addr {
 	if c.conn != nil {
-		return &simpleAddr{network: "grpc", address: c.conn.Target()}
+		return &simpleAddr{network: grpcNetwork, address: c.conn.Target()}
 	}
-	return &simpleAddr{network: "grpc", address: "grpc-client"}
+	return &simpleAddr{network: grpcNetwork, address: "grpc-client"}
 }
 
 // LocalAddr implements transport.Connection
 func (c *grpcConnection) LocalAddr() net.Addr {
-	return &simpleAddr{network: "grpc", address: "grpc-server"}
+	return &simpleAddr{network: grpcNetwork, address: "grpc-server"}
 }
 
 // GetClientID gets client ID - for upper layer code to extract client information
@@ -248,10 +285,8 @@ func (c *grpcConnection) GetPassword() string {
 
 // receiveLoop handles receiving messages
 func (c *grpcConnection) receiveLoop() {
-	defer func() {
-		close(c.readChan)
-		close(c.errorChan)
-	}()
+	// Only readChan is closed, so ReadMessage returns queued data before io.EOF.
+	defer close(c.readChan)
 
 	for {
 		select {
@@ -294,6 +329,9 @@ func isGRPCError(err error) bool {
 	}
 	return false
 }
+
+// grpcNetwork is the network name of gRPC connection addresses
+const grpcNetwork = "grpc"
 
 // simpleAddr simple address implementation
 type simpleAddr struct {

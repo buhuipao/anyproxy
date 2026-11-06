@@ -17,12 +17,12 @@ func TestFileStore(t *testing.T) {
 
 	// Test Set and Get
 	t.Run("SetAndGet", func(t *testing.T) {
-		err := store.Set("group1", hashPassword("password1"))
+		err := store.Set("group1", "password1")
 		require.NoError(t, err)
 
 		hash, err := store.Get("group1")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
+		assert.Equal(t, "password1", hash)
 	})
 
 	// Test persistence
@@ -33,7 +33,7 @@ func TestFileStore(t *testing.T) {
 
 		hash, err := store2.Get("group1")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
+		assert.Equal(t, "password1", hash)
 	})
 
 	// Test ValidatePassword

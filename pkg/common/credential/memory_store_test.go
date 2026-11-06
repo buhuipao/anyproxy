@@ -12,17 +12,17 @@ func TestMemoryStore(t *testing.T) {
 
 	// Test Set and Get
 	t.Run("SetAndGet", func(t *testing.T) {
-		err := store.Set("group1", hashPassword("password1"))
+		err := store.Set("group1", "password1")
 		require.NoError(t, err)
 
 		hash, err := store.Get("group1")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password1"), hash)
+		assert.Equal(t, "password1", hash)
 	})
 
 	// Test ValidatePassword
 	t.Run("ValidatePassword", func(t *testing.T) {
-		err := store.Set("group2", hashPassword("password2"))
+		err := store.Set("group2", "password2")
 		require.NoError(t, err)
 
 		valid := store.ValidatePassword("group2", "password2")
@@ -37,24 +37,24 @@ func TestMemoryStore(t *testing.T) {
 
 	// Test Update
 	t.Run("Update", func(t *testing.T) {
-		err := store.Set("group3", hashPassword("password3"))
+		err := store.Set("group3", "password3")
 		require.NoError(t, err)
 
 		hash1, err := store.Get("group3")
 		require.NoError(t, err)
 
-		err = store.Set("group3", hashPassword("newpassword3"))
+		err = store.Set("group3", "newpassword3")
 		require.NoError(t, err)
 
 		hash2, err := store.Get("group3")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("newpassword3"), hash2)
+		assert.Equal(t, "newpassword3", hash2)
 		assert.NotEqual(t, hash1, hash2)
 	})
 
 	// Test Delete
 	t.Run("Delete", func(t *testing.T) {
-		err := store.Set("group4", hashPassword("password4"))
+		err := store.Set("group4", "password4")
 		require.NoError(t, err)
 
 		err = store.Delete("group4")
@@ -68,17 +68,17 @@ func TestMemoryStore(t *testing.T) {
 	t.Run("MultipleGroups", func(t *testing.T) {
 		store := NewMemoryStore() // Fresh store
 
-		err := store.Set("group5", hashPassword("password5"))
+		err := store.Set("group5", "password5")
 		require.NoError(t, err)
-		err = store.Set("group6", hashPassword("password6"))
+		err = store.Set("group6", "password6")
 		require.NoError(t, err)
 
 		hash5, err := store.Get("group5")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password5"), hash5)
+		assert.Equal(t, "password5", hash5)
 
 		hash6, err := store.Get("group6")
 		require.NoError(t, err)
-		assert.Equal(t, hashPassword("password6"), hash6)
+		assert.Equal(t, "password6", hash6)
 	})
 }

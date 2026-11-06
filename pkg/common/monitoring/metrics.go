@@ -110,28 +110,24 @@ func (m *MetricsManager) CreateConnection(connID, clientID, targetHost string) {
 }
 
 // UpdateConnectionBytes updates byte counters for existing connection
+// 🚀 OPTIMIZED: Lock-free for global metrics, read-lock for connection lookup
+// This is called per-packet so performance is critical
 func (m *MetricsManager) UpdateConnectionBytes(connID, clientID string, bytesSent, bytesReceived int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Always update global and client metrics, even if specific connection doesn't exist
-	// This ensures metrics consistency across distributed processes
+	// 🚀 Global metrics use atomic operations - no lock needed
 	if bytesSent > 0 {
 		atomic.AddInt64(&m.global.BytesSent, bytesSent)
-		logger.Debug("Global bytes sent updated", "conn_id", connID, "client_id", clientID, "bytes", bytesSent, "new_total", atomic.LoadInt64(&m.global.BytesSent))
 	}
 	if bytesReceived > 0 {
 		atomic.AddInt64(&m.global.BytesReceived, bytesReceived)
-		logger.Debug("Global bytes received updated", "conn_id", connID, "client_id", clientID, "bytes", bytesReceived, "new_total", atomic.LoadInt64(&m.global.BytesReceived))
 	}
 
-	// Update client stats
-	if bytesSent > 0 || bytesReceived > 0 {
-		m.updateClientStats(clientID, "", bytesSent, bytesReceived, false)
-	}
-
-	// Update connection-specific bytes if connection exists
+	// 🚀 Use read lock for connection lookup (much faster than write lock)
+	m.mu.RLock()
 	conn, exists := m.connections[connID]
+	client, clientExists := m.clients[clientID]
+	m.mu.RUnlock()
+
+	// Update connection-specific bytes if connection exists (atomic, no lock)
 	if exists {
 		if bytesSent > 0 {
 			atomic.AddInt64(&conn.BytesSent, bytesSent)
@@ -139,11 +135,19 @@ func (m *MetricsManager) UpdateConnectionBytes(connID, clientID string, bytesSen
 		if bytesReceived > 0 {
 			atomic.AddInt64(&conn.BytesReceived, bytesReceived)
 		}
-		logger.Debug("Updated connection metrics", "conn_id", connID, "client_id", clientID, "bytes_sent", bytesSent, "bytes_received", bytesReceived)
-	} else {
-		// Log when updating metrics for non-existent connection (this is expected in distributed setup)
-		logger.Debug("Updated global metrics for cleaned-up connection", "conn_id", connID, "client_id", clientID, "bytes_sent", bytesSent, "bytes_received", bytesReceived)
 	}
+
+	// Update client stats (atomic, no lock for existing clients)
+	if clientExists {
+		if bytesSent > 0 {
+			atomic.AddInt64(&client.BytesSent, bytesSent)
+		}
+		if bytesReceived > 0 {
+			atomic.AddInt64(&client.BytesReceived, bytesReceived)
+		}
+		// Note: LastSeen update skipped for performance - updated during cleanup
+	}
+	// Note: No logging here - this function is called per-packet
 }
 
 // CloseConnection removes connection and updates counters
@@ -244,10 +248,9 @@ func (m *MetricsManager) GetAllClientStats() map[string]*ClientMetrics {
 		}
 
 		// 🔧 CRITICAL FIX: If client is offline, it should have 0 active connections
+		// (MarkClientOffline removes its stale connections under the write lock)
 		if !clientCopy.IsOnline {
 			clientCopy.ActiveConnections = 0
-			// Also clean up any stale connections for this offline client
-			m.cleanupOfflineClientConnections(k)
 		}
 
 		result[k] = &clientCopy
@@ -255,7 +258,7 @@ func (m *MetricsManager) GetAllClientStats() map[string]*ClientMetrics {
 	return result
 }
 
-// cleanupOfflineClientConnections removes stale connections for offline clients
+// cleanupOfflineClientConnections removes stale connections for offline clients (must hold write lock)
 func (m *MetricsManager) cleanupOfflineClientConnections(clientID string) {
 	connectionsToRemove := make([]string, 0)
 
@@ -301,6 +304,7 @@ func (m *MetricsManager) MarkClientOffline(clientID string) {
 		client.IsOnline = false
 		client.LastSeen = time.Now()
 		logger.Debug("Marked client offline", "client_id", clientID)
+		m.cleanupOfflineClientConnections(clientID)
 	}
 }
 
@@ -336,40 +340,6 @@ func (m *MetricsManager) Cleanup(maxOfflineTime time.Duration) {
 	}
 }
 
-// UpdateClientMetrics updates client metrics (legacy compatibility)
-func UpdateClientMetrics(clientID, groupID string, bytesSent, bytesReceived int64, isError bool) {
-	globalManager.UpdateClientMetrics(clientID, groupID, bytesSent, bytesReceived, isError)
-}
-
-// UpdateConnectionMetrics updates connection metrics (legacy compatibility)
-func UpdateConnectionMetrics(connID, clientID, targetHost string, bytesSent, bytesReceived int64, status string) {
-	if status == "closed" {
-		globalManager.CloseConnection(connID)
-	} else {
-		// For backward compatibility: create connection if it doesn't exist, then update bytes
-		globalManager.mu.RLock()
-		_, exists := globalManager.connections[connID]
-		globalManager.mu.RUnlock()
-
-		if !exists {
-			globalManager.CreateConnection(connID, clientID, targetHost)
-		}
-
-		if bytesSent > 0 || bytesReceived > 0 {
-			globalManager.UpdateConnectionBytes(connID, clientID, bytesSent, bytesReceived)
-		}
-	}
-}
-
-// UpdateConnectionBytesWithStatus updates connection byte counters with status (legacy compatibility)
-func UpdateConnectionBytesWithStatus(connID, clientID string, bytesSent, bytesReceived int64, status string) {
-	if status == "closed" {
-		globalManager.CloseConnection(connID)
-	} else {
-		globalManager.UpdateConnectionBytes(connID, clientID, bytesSent, bytesReceived)
-	}
-}
-
 // GetMetrics returns global metrics
 func GetMetrics() *Metrics {
 	return globalManager.global
@@ -390,9 +360,46 @@ func GetClientMetrics(clientID string) *ClientMetrics {
 	return globalManager.GetClientStats(clientID)
 }
 
+// UpdateClientMetrics updates client metrics
+func UpdateClientMetrics(clientID, groupID string, bytesSent, bytesReceived int64, isError bool) {
+	globalManager.UpdateClientMetrics(clientID, groupID, bytesSent, bytesReceived, isError)
+}
+
 // MarkClientOffline marks a client as offline
 func MarkClientOffline(clientID string) {
 	globalManager.MarkClientOffline(clientID)
+}
+
+// UpdateClientHeartbeat updates client heartbeat timestamp
+func UpdateClientHeartbeat(clientID, groupID string) {
+	globalManager.UpdateClientHeartbeat(clientID, groupID)
+}
+
+// IncrementErrors increments error count
+func IncrementErrors() {
+	atomic.AddInt64(&globalManager.global.ErrorCount, 1)
+}
+
+// UpdateClientHeartbeat updates client heartbeat timestamp (method on MetricsManager)
+func (m *MetricsManager) UpdateClientHeartbeat(clientID, groupID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client, exists := m.clients[clientID]
+	if !exists {
+		client = &ClientMetrics{
+			ClientID: clientID,
+			GroupID:  groupID,
+			IsOnline: true,
+		}
+		m.clients[clientID] = client
+	}
+
+	client.LastSeen = time.Now()
+	client.IsOnline = true
+	if groupID != "" {
+		client.GroupID = groupID
+	}
 }
 
 // Simple cleanup timer with proper synchronization
@@ -424,7 +431,7 @@ func StartCleanupProcess() {
 			cleanupWg.Done()
 			if r := recover(); r != nil {
 				// Prevent panic if ticker is nil
-				logger.Error("Clean up panic", "error", r, "stack", string(debug.Stack()))
+				logger.Error("Clean up panic", "err", r, "stack", string(debug.Stack()))
 			}
 		}()
 
@@ -436,26 +443,7 @@ func StartCleanupProcess() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// 🔧 More aggressive cleanup: offline timeout reduced to 2 minutes, cleanup after 3 minutes
-				globalManager.Cleanup(3 * time.Minute) // Remove clients offline for more than 3 minutes (was 5 minutes)
-
-				// 🔧 Also validate and fix connection count inconsistencies periodically
-				globalCount, actualCount, isConsistent := globalManager.ValidateConnectionCounts()
-				if !isConsistent {
-					logger.Warn("Detected connection count inconsistency during cleanup",
-						"global_count", globalCount,
-						"actual_count", actualCount,
-						"difference", globalCount-actualCount)
-
-					// Fix inconsistency automatically
-					oldCount, newCount := globalManager.FixConnectionCountInconsistency()
-					if oldCount != newCount {
-						logger.Info("Auto-fixed connection count inconsistency",
-							"old_count", oldCount,
-							"new_count", newCount,
-							"corrected", oldCount-newCount)
-					}
-				}
+				globalManager.Cleanup(3 * time.Minute)
 			}
 		}
 	}()
@@ -485,34 +473,6 @@ func StopCleanupProcess() {
 
 	// Wait for cleanup goroutine to finish (outside of lock)
 	cleanupWg.Wait()
-}
-
-// Legacy compatibility functions (for tests only)
-
-// IncrementActiveConnections increments active connection count (legacy compatibility - tests only)
-func IncrementActiveConnections() {
-	atomic.AddInt64(&globalManager.global.ActiveConnections, 1)
-	atomic.AddInt64(&globalManager.global.TotalConnections, 1)
-}
-
-// DecrementActiveConnections decrements active connection count (legacy compatibility - tests only)
-func DecrementActiveConnections() {
-	atomic.AddInt64(&globalManager.global.ActiveConnections, -1)
-}
-
-// AddBytesSent adds bytes sent to global counter (legacy compatibility - tests only)
-func AddBytesSent(bytes int64) {
-	atomic.AddInt64(&globalManager.global.BytesSent, bytes)
-}
-
-// AddBytesReceived adds bytes received to global counter (legacy compatibility - tests only)
-func AddBytesReceived(bytes int64) {
-	atomic.AddInt64(&globalManager.global.BytesReceived, bytes)
-}
-
-// IncrementErrors increments error count (used in production code)
-func IncrementErrors() {
-	atomic.AddInt64(&globalManager.global.ErrorCount, 1)
 }
 
 // humanizeBytes converts bytes to human-readable format
@@ -573,16 +533,6 @@ func (m *MetricsManager) FixConnectionCountInconsistency() (oldCount, newCount i
 	}
 
 	return oldCount, newCount
-}
-
-// ValidateConnectionCounts validates connection count consistency (tests only)
-func ValidateConnectionCounts() (globalCount, actualCount int64, isConsistent bool) {
-	return globalManager.ValidateConnectionCounts()
-}
-
-// FixConnectionCountInconsistency fixes connection count inconsistency (tests only)
-func FixConnectionCountInconsistency() (oldCount, newCount int64) {
-	return globalManager.FixConnectionCountInconsistency()
 }
 
 // CreateConnection creates a new connection record (public API)

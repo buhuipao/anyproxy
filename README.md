@@ -1,7 +1,7 @@
 # AnyProxy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/buhuipao/anyproxy)
 [![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)]()
 [![Release](https://img.shields.io/github/v/release/buhuipao/anyproxy)](https://github.com/buhuipao/anyproxy/releases)
@@ -122,7 +122,7 @@ SSH, Web, AI ←────────────────── Secure Pr
 • **Proxy Authentication**: Use `group_id` as username, `group_password` as password
 • **Routing Mechanism**: Gateway routes traffic to corresponding client group based on authenticated `group_id`
 • **Each Client**: Registers with unique `group_id` and `group_password`
-• **Password Consistency**: All clients with the same `group_id` must use identical `group_password`, or authentication will fail
+• **Password Consistency**: All clients with the same `group_id` must use identical `group_password`; the gateway rejects a client whose password differs from the registered one
 ```
 
 ## 📊 Protocol Comparison
@@ -137,6 +137,8 @@ SSH, Web, AI ←────────────────── Secure Pr
 - Each Gateway/Client instance uses only ONE transport protocol
 - TUIC protocol simplified: uses `group_id` as UUID, `group_password` as Token
 - All proxy protocols authenticate directly using `group_id` for routing
+- SOCKS5 UDP ASSOCIATE: UDP datagrams must come from the same IP as the SOCKS5 TCP control connection (RFC 1928). Datagrams are dropped if TCP and UDP are NATed to different IPs (for example separate load balancers, or Kubernetes `externalTrafficPolicy: Cluster`)
+- HTTP CONNECT and SOCKS5 CONNECT tunnels close as soon as either side closes; the tunnel has no half-close. A client that half-closes and then waits for the reply (such as `nc -N` or `socat`) gets no reply
 
 ## 🚀 Quick Start
 
@@ -149,7 +151,7 @@ AnyProxy operates on a **group authentication** model:
 
 ### Requirements
 
-- **Docker** (recommended) or **Go 1.23+**
+- **Docker** (recommended) or **Go 1.25+**
 - **Public Server** for Gateway deployment
 - **TLS Certificates** (required for transport layer security)
 
@@ -243,6 +245,7 @@ client:
   # Block dangerous hosts
   forbidden_hosts:
     - "169.254.0.0/16"      # Cloud metadata
+    - "fd00:ec2::254"       # Cloud metadata over IPv6
     
   web:
     enabled: true
@@ -373,18 +376,33 @@ gateway:
 
 ```yaml
 client:
-  # Allowed hosts (whitelist)
+  # Allowed hosts (whitelist); empty allows everything not forbidden
   allowed_hosts:
     - "localhost:22"
     - "localhost:80"
     - "192.168.1.0/24:*"
     
-  # Forbidden hosts (blacklist)
+  # Dial IPv6 targets too (default false); see the IPv6 note below first
+  allow_ipv6: false
+    
+  # Forbidden hosts (blacklist); forbidden rules always win
   forbidden_hosts:
     - "169.254.0.0/16"      # Cloud metadata
-    - "127.0.0.1"           # Localhost
     - "10.0.0.0/8"          # Private networks
+    - "fe80::/10"           # IPv6 link-local, for allow_ipv6: true
+    - "fc00::/7"            # IPv6 private networks, for allow_ipv6: true
 ```
+
+Rule forms:
+- `example.com` matches that host and its subdomains (such as `api.example.com`, but not `evilexample.com`), on any port
+- `example.com:443` and `example.com:*` match only that exact host, not its subdomains: forbidden `internal.corp:*` does not block `db.internal.corp`, so also list `*.internal.corp:*` to cover subdomains
+- `*.example.com` matches subdomains, on any port; `*.example.com:443` also checks the port
+- `127.0.0.1`, `127.0.0.1:22`, `10.0.0.0/8` and `10.0.0.0/8:22` are IP rules; IPv6 IP rules are written `::1` (or `[::1]`), `[::1]:22`, `fc00::/7` and `fc00::/7:22`
+- A pattern with regex characters such as `\.`, `^` or `(` is a regular expression matched against `host:port`
+
+The client resolves each target once, checks IP rules against every resolved address, and dials only those addresses. Forbidden rules win over allowed rules: if the name or any resolved IP matches a forbidden rule, the target is denied. For example, forbidding `127.0.0.0/8` also denies `localhost:22` even though it is allowed above. Name and wildcard rules only see the requested name, so use IP or CIDR rules to block address ranges. An IPv4-mapped address such as `::ffff:127.0.0.1` is checked as `127.0.0.1`. When `allowed_hosts` contains an IP or CIDR rule, a name that no name rule matches is resolved by DNS before the allow check can decide.
+
+IPv6: by default (`allow_ipv6: false`) the client resolves and dials IPv4 only, so an IPv6 target such as `[2001:db8::1]:443` fails and a name is dialed on its IPv4 addresses. Set `allow_ipv6: true` to dial IPv6 targets too. IPv4 rules do not match IPv6 addresses: forbidding `127.0.0.0/8` does not block `[::1]:22`. Before turning it on, also forbid IPv6 ranges such as `::1`, `::`, `fe80::/10`, `fc00::/7` and `fd00:ec2::254`. With it on, IP rules in `allowed_hosts` must match every resolved address, IPv6 too, so a name with IPv4 and IPv6 addresses needs an allow rule for each.
 
 ### HTTPS Proxy Configuration
 
@@ -426,16 +444,21 @@ gateway:
 **Memory Storage (Default)**:
 - Fast, in-memory key-value storage
 - Credentials lost on restart
-- Clients must provide group_password
+- Clients must provide group_password; a client without one is rejected
+- Credentials are removed when the last client of a group disconnects
+- To change a group's password, stop all of its clients, then start them with the new password
 - Ideal for development/testing
 
 **File Storage**:
 - Persistent JSON storage
-- SHA256 password hashing
+- Stores raw group passwords (not hashed); keep the file private
 - Thread-safe operations
 - Automatic file management
 - Good for simple deployments
-- Client group_password is optional (pre-configure in file)
+- Clients must provide group_password, also for pre-configured groups; a client without one is rejected
+- A client whose group_password differs from the stored one is rejected
+- To change a group's password, edit the file, then restart the group's clients with the new password. The file is re-read on every check, so the gateway needs no restart
+- Credentials stay when all clients of a group disconnect
 
 **Database Storage**:
 - High availability and scalability
@@ -443,17 +466,20 @@ gateway:
 - Automatic table creation
 - Prepared statements for performance
 - Ideal for production clusters
-- Client group_password is optional (pre-configure in database)
+- Clients must provide group_password, also for pre-configured groups; a client without one is rejected
+- A client whose group_password differs from the stored one is rejected
+- To change a group's password, update its row, then restart the group's clients with the new password. The row is read on every check, so the gateway needs no restart
+- Credentials stay when all clients of a group disconnect
 
-Example credential file structure (simple JSON map):
+Example credential file structure (simple JSON map of group_id to raw group_password):
 ```json
 {
-  "prod-group": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-  "dev-group": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+  "prod-group": "prod-secret",
+  "dev-group": "dev-secret"
 }
 ```
 
-Database credential table structure:
+Database credential table structure (the `password_hash` column holds the raw group password, not a hash, up to 64 characters):
 ```sql
 CREATE TABLE IF NOT EXISTS credentials (
     group_id VARCHAR(255) PRIMARY KEY,
@@ -465,24 +491,26 @@ CREATE TABLE IF NOT EXISTS credentials (
 
 #### Using Pre-configured Credentials
 
-With file or database storage, you can pre-configure credentials and clients don't need passwords:
+With file or database storage, you can pre-configure credentials. Clients of those groups must still send the stored password as group_password.
+
+> **Upgrade note:** earlier versions let clients of pre-configured file/db groups omit group_password. Such clients must now set group_password to the stored password, or the gateway rejects them.
 
 **1. Pre-configure credentials (example using SQLite):**
 ```sql
--- Insert pre-hashed password (SHA256 of "secret123")
+-- Insert the raw group password; the password_hash column stores it as is
 INSERT INTO credentials (group_id, password_hash) VALUES 
-('prod-env', '66b86ab0e95c36340b9dbeb8f52873dc85025c448e1cc1de0b72cf07bb091efc');
+('prod-env', 'secret123');
 ```
 
-**2. Client configuration (no password needed):**
+**2. Client configuration (the same password as stored):**
 ```yaml
 client:
   id: "prod-client"
   group_id: "prod-env"
-  # group_password: not needed when using file/db storage
+  group_password: "secret123"  # must match the stored password
 ```
 
-**3. Proxy authentication still uses the password:**
+**3. Proxy authentication uses the same password:**
 ```bash
 curl -x http://prod-env:secret123@gateway:8080 http://example.com
 ```
@@ -506,6 +534,7 @@ curl -x http://prod-env:secret123@gateway:8080 http://example.com
 ### Gateway Dashboard
 - **Access**: `http://YOUR_GATEWAY_IP:8090`
 - **Authentication**: Use `gateway.web.auth_username` and `gateway.web.auth_password` from config file
+- **Platform API**: `POST /api/credentials/register` needs HTTP Basic Auth with the same username and password, even when `auth_enabled` is false. If they are not set, it always returns 401. Its `bandwidth_mbps` field is stored but not enforced yet
 - **Features**: Real-time monitoring, client management, connection statistics
 
 ### Client Monitoring Interface
@@ -539,6 +568,11 @@ curl -x http://prod-env:secret123@gateway:8080 http://example.com
 **5. QUIC/TUIC Connection Issues**
 - Ensure Docker ports are set as UDP type (`-p 9091:9091/udp`)
 - Check firewall allows UDP traffic
+
+**6. A Connection Ends Early After the User Stopped Reading**
+- For each connection, the gateway queues about 7000 messages that the user has not read yet. When that queue is full and the user reads nothing for 100ms (for example a paused player or a suspended terminal), the gateway closes the connection so it does not hold up the other connections of the same client, and logs `Message channel full, closing connection`
+- A user that keeps reading, but slower than the target sends, is not closed. Once its queue is full, each of its messages can hold up the other connections of the same client for up to 100ms, so those connections move at its pace
+- The user first receives part of the queued data and then a normal end of stream. A protocol without its own length framing (for example an HTTP response that ends when the connection closes) cannot tell that the data was cut short
 
 ### View Logs
 

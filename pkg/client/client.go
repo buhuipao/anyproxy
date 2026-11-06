@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/buhuipao/anyproxy/pkg/common/buffer"
 	"github.com/buhuipao/anyproxy/pkg/common/connection"
-	"github.com/buhuipao/anyproxy/pkg/common/message"
 	"github.com/buhuipao/anyproxy/pkg/common/monitoring"
 	"github.com/buhuipao/anyproxy/pkg/common/protocol"
 	"github.com/buhuipao/anyproxy/pkg/config"
@@ -22,20 +23,42 @@ import (
 	_ "github.com/buhuipao/anyproxy/pkg/transport/websocket"
 )
 
+// ConnectionState represents the state of the client connection
+type ConnectionState int
+
+const (
+	// ConnectionStateDisconnected indicates the client is not connected
+	ConnectionStateDisconnected ConnectionState = iota
+	// ConnectionStateConnecting indicates the client is attempting to connect
+	ConnectionStateConnecting
+	// ConnectionStateConnected indicates the client is connected
+	ConnectionStateConnected
+)
+
+// ConnectionStateCallback is called when the connection state changes
+type ConnectionStateCallback func(state ConnectionState, err error)
+
+// connState holds connection-related state that changes together atomically
+// Using a single struct reduces atomic operations and keeps related state consistent
+type connState struct {
+	conn        transport.Connection
+	smartWriter *buffer.SmartWriter
+}
+
 // Client struct
 type Client struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	config     *config.ClientConfig
-	conn       transport.Connection // 🆕 Use transport layer connection
-	transport  transport.Transport  // 🆕 Transport layer instance
-	connMgr    *connection.Manager  // 🆕 Use shared connection manager
+	transport  transport.Transport // 🆕 Transport layer instance
+	connMgr    *connection.Manager // 🆕 Use shared connection manager
 	wg         sync.WaitGroup
 	actualID   string
 	replicaIdx int
 
-	// 🆕 Shared message handler
-	msgHandler message.ExtendedMessageHandler
+	// 🚀 Use atomic.Pointer for lock-free access to connection state
+	// This is much faster than RWMutex for high-frequency read operations (~1-2ns vs ~10-20ns)
+	connStatePtr atomic.Pointer[connState]
 
 	// Enhanced host pattern matching
 	forbiddenHostPatterns []*HostPattern // Enhanced forbidden host patterns
@@ -43,6 +66,24 @@ type Client struct {
 
 	// 🆕 Added for web server integration
 	webServer interface{}
+
+	// 🆕 Heartbeat control
+	heartbeatStop     chan struct{}
+	heartbeatStopOnce sync.Once // 🛡️ Ensure heartbeatStop is closed only once
+
+	// 🆕 Connection state callback for external monitoring
+	connectionStateCallback ConnectionStateCallback
+	connectionStateMu       sync.RWMutex
+}
+
+// getConnState returns the current connection state atomically (lock-free, ~1-2ns)
+func (c *Client) getConnState() *connState {
+	return c.connStatePtr.Load()
+}
+
+// setConnState sets the connection state atomically
+func (c *Client) setConnState(state *connState) {
+	c.connStatePtr.Store(state)
 }
 
 // NewClient creates a new proxy client
@@ -51,10 +92,10 @@ func NewClient(cfg *config.ClientConfig, transportType string, replicaIdx int) (
 	if cfg.GroupID == "" {
 		return nil, fmt.Errorf("group_id cannot be empty")
 	}
-	// Note: group_password is optional - when using file/db credential storage,
-	// credentials are pre-configured and client doesn't need to provide password
+	// Note: group_password is required; the gateway rejects a client without it
+	// for every credential store type
 
-	logger.Info("Creating new client", "client_id", cfg.ClientID, "replica_idx", replicaIdx, "gateway_addr", cfg.Gateway.Addr, "group_id", cfg.GroupID, "transport_type", transportType, "allowed_hosts_count", len(cfg.AllowedHosts), "forbidden_hosts_count", len(cfg.ForbiddenHosts), "open_ports_count", len(cfg.OpenPorts), "auth_enabled", cfg.Gateway.AuthUsername != "")
+	logger.Info("Creating new client", "client_id", cfg.ClientID, "replica_idx", replicaIdx, "gateway_addr", cfg.Gateway.Addr, "group_id", cfg.GroupID, "transport_type", transportType, "allow_ipv6", cfg.AllowIPv6, "allowed_hosts_count", len(cfg.AllowedHosts), "forbidden_hosts_count", len(cfg.ForbiddenHosts), "open_ports_count", len(cfg.OpenPorts), "auth_enabled", cfg.Gateway.AuthUsername != "")
 
 	// Log security policy details
 	if len(cfg.ForbiddenHosts) > 0 {
@@ -136,7 +177,7 @@ func (c *Client) Stop() error {
 	logger.Info("Initiating graceful client stop", "client_id", c.getClientID())
 
 	// Step 1: Cancel context
-	logger.Debug("Cancelling client context", "client_id", c.getClientID())
+	logger.Debug("Canceling client context", "client_id", c.getClientID())
 	c.cancel()
 
 	// Step 2: Get connection count
@@ -206,4 +247,23 @@ func (c *Client) UpdateClientMetrics(bytesSent, bytesReceived int64, isError boo
 // SetWebServer sets the web server reference for client ID updates
 func (c *Client) SetWebServer(webServer interface{}) {
 	c.webServer = webServer
+}
+
+// SetConnectionStateCallback sets the callback function for connection state changes
+// The callback will be invoked when the connection state changes (connecting, connected, disconnected)
+func (c *Client) SetConnectionStateCallback(callback ConnectionStateCallback) {
+	c.connectionStateMu.Lock()
+	defer c.connectionStateMu.Unlock()
+	c.connectionStateCallback = callback
+}
+
+// notifyConnectionState notifies the callback of connection state changes
+func (c *Client) notifyConnectionState(state ConnectionState, err error) {
+	c.connectionStateMu.RLock()
+	callback := c.connectionStateCallback
+	c.connectionStateMu.RUnlock()
+
+	if callback != nil {
+		callback(state, err)
+	}
 }
